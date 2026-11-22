@@ -161,7 +161,3 @@ export const AutocompactRpc = Rpc.define({
   },
 })
 
-export function requestDirectory(input: { directory?: string }, fallback: string): string {
-  const directory = typeof input.directory === "string" ? input.directory.trim() : ""
-  return directory.length > 0 ? directory : fallback
-}

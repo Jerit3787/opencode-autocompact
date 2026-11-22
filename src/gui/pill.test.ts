@@ -78,4 +78,14 @@ describe("autocompactPillView", () => {
     state.message = undefined
     expect(autocompactPillView({ session, payload, override: null })).toBeUndefined()
   })
+
+  it("hides when the settings file is degraded", () => {
+    expect(
+      autocompactPillView({
+        session,
+        payload: { ...payload, degraded: true },
+        override: null,
+      }),
+    ).toBeUndefined()
+  })
 })

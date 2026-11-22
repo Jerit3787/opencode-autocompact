@@ -426,7 +426,8 @@ GUI checks:
 - Exact Settings page control layout and copy.
 - Exact JSON Schema syntax for the RPC contract.
 - How to resolve/canonicalize the project directory in the GUI when the active
-  session is a worktree.
+  session is a worktree: settled as `session.project.worktree`, then
+  `listedProject.worktree`, then `session.directory`.
 - Whether to add a global "automatic compaction enabled" switch in a later
   version (not v1).
 - Whether to add project-level settings to the TUI in a later version.

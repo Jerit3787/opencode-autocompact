@@ -172,7 +172,7 @@ export default Plugin.define({
       const session = input.sessionID
         ? await ctx.session.get({ sessionID: input.sessionID })
         : undefined
-      const override = session ? readSessionOverride(session.metadata) : null
+      const override = directory && session ? readSessionOverride(session.metadata) : null
       const [resolved, state] = await Promise.all([
         store.resolve({ directory, session: override }),
         store.readState(),
@@ -424,6 +424,13 @@ export default Plugin.define({
         const directory = value.directory
           ? await canonicalDirectory(value.directory)
           : canonical
+        if (!directory) {
+          return context.error(
+            "invalid_directory",
+            "Project directory must be an absolute path.",
+            { message: "Project directory must be an absolute path." },
+          )
+        }
         try {
           await store.setGlobal(value.threshold)
         } catch (error) {
@@ -432,7 +439,16 @@ export default Plugin.define({
 
         await refreshSession(value.sessionID, directory)
         await notifyChanged({ directory, sessionID: value.sessionID })
-        return payloadFor({ directory: value.directory, sessionID: value.sessionID })
+        try {
+          return await payloadFor({ directory: value.directory, sessionID: value.sessionID })
+        } catch (error) {
+          if (value.sessionID) {
+            return context.error("not_found", `Session not found: ${value.sessionID}`, {
+              sessionID: value.sessionID,
+            })
+          }
+          throw error
+        }
       },
       setProject: async (input, context) => {
         const value = input as {
@@ -465,7 +481,16 @@ export default Plugin.define({
 
         await refreshSession(value.sessionID, directory)
         await notifyChanged({ directory, sessionID: value.sessionID })
-        return payloadFor({ directory, sessionID: value.sessionID })
+        try {
+          return await payloadFor({ directory, sessionID: value.sessionID })
+        } catch (error) {
+          if (value.sessionID) {
+            return context.error("not_found", `Session not found: ${value.sessionID}`, {
+              sessionID: value.sessionID,
+            })
+          }
+          throw error
+        }
       },
       setSession: async (input, context) => {
         const value = input as {
@@ -512,7 +537,13 @@ export default Plugin.define({
 
         await refreshSession(value.sessionID, directory)
         await notifyChanged({ directory, sessionID: value.sessionID })
-        return payloadFor({ directory, sessionID: value.sessionID })
+        try {
+          return await payloadFor({ directory, sessionID: value.sessionID })
+        } catch (error) {
+          return context.error("not_found", `Session not found: ${value.sessionID}`, {
+            sessionID: value.sessionID,
+          })
+        }
       },
     })
 

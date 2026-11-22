@@ -38,7 +38,7 @@
 - **Session metadata with unrelated keys** must be preserved when setting/clearing the chat override. Test in Task 1.
 - **A threshold lowered below a disarmed session's context** must re-arm it and trigger on the next observation, not loop. Test in Task 3.
 - **A settings file changed by another process** must be picked up by mtime, not a stale cache. Test in Task 2.
-- **An RPC call arriving at the wrong project-location plugin instance** must use the directory in the request, not `ctx.location`. Test the directory resolver in Task 6 and verify with two projects in Task 10.
+- **An RPC call arriving at the wrong project-location plugin instance** must use the directory in the request, not `ctx.location`. The directory resolver lives in the server handler; verify with two sessions plus a temporary global/project override in Task 10.
 
 ---
 
@@ -794,7 +794,10 @@ Create `src/rpc.ts` with `Rpc.define` id `autocompact`. Use JSON Schema:
 - Each method outputs `SettingsPayload`: `global` number, `project` number|null, `session` number|null, `effective` number, `source` enum, `enabled` boolean, and `projects` as an array of `{ directory, threshold }` for every project override.
 - Errors: `invalid_threshold` with `{ minimum: number }`, `write_failed` with `{ message: string }`.
 - Event `changed` with `{ directory?: string, sessionID?: string }`.
-- Export `requestDirectory(input, fallback)`: trimmed `input.directory` or fallback.
+- Implementation note: directory resolution moved to `canonicalDirectory` in
+  `src/index.ts` (expand `~`, require absolute, `realpath` when present). The
+  earlier `requestDirectory` helper was removed because it resolved only the
+  receiving instance's fallback.
 
 - [ ] **Step 2: Add a failing test for the directory resolver**
 
@@ -1126,7 +1129,10 @@ ctx.add(ComposerPill, {
   id: "autocompact",
   order: 0,
   show: (input) => {
-    const directory = input.session.project?.canonical ?? input.session.directory
+    const directory =
+      input.session.project?.worktree ??
+      input.session.listedProject?.worktree ??
+      input.session.directory
     const key = settingsKey(directory, input.session.id)
     const payload = settingsState[key]
 

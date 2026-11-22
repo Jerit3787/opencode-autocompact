@@ -39,6 +39,9 @@ export function autocompactPillView(input: {
   onReset?: () => void
 }): AutocompactPillView | undefined {
   try {
+    // The fallback threshold is not the user's value; hide rather than lie.
+    if (input.payload.degraded) return undefined
+
     const messages = input.session.server.data.session.message.list(input.session.id)
     const info = input.session.server.data.session.get(input.session.id)
     const message = lastAssistantWithUsage(messages, info?.revert?.messageID)

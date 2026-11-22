@@ -99,10 +99,11 @@ path, and resolves symlinks, so the key matches the project the server uses.
 
 The settings file is read with an mtime/size cache checked at most once per
 second. Writes are atomic (`temp` + rename) and serialized in-process. If the
-file cannot be read or parsed, the plugin copies it to
-`~/.config/opencode/autocompact.json.bak`, shows a warning in Settings, and
-refuses to save until the file is fixed or removed; a save cannot silently
-replace the other project entries with a partial file.
+file's contents cannot be parsed, the plugin copies it to
+`~/.config/opencode/autocompact.json.bak`; any read failure marks the store
+degraded. Settings shows a warning and refuses to save until the file is fixed
+or removed, so a save cannot silently replace the other project entries with a
+partial file. The pill hides while degraded rather than showing a fallback.
 
 ## Composer pill
 

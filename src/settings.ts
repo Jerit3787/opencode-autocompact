@@ -38,6 +38,9 @@ export function parseSettings(value: unknown, _fallback: number): SettingsData {
 
   const global = record(input.global)
   if (global && isValidThreshold(global.threshold)) settings.global.threshold = global.threshold
+  else if (global?.threshold !== undefined) {
+    console.warn("[autocompact] ignoring invalid global threshold:", global.threshold)
+  }
 
   const projects = record(input.projects)
   if (!projects) return settings
@@ -46,6 +49,11 @@ export function parseSettings(value: unknown, _fallback: number): SettingsData {
     const project = record(entry)
     if (project && isValidThreshold(project.threshold)) {
       settings.projects[directory] = { threshold: project.threshold }
+    } else if (project?.threshold !== undefined) {
+      console.warn(
+        `[autocompact] ignoring invalid threshold for ${directory}:`,
+        project.threshold,
+      )
     }
   }
   return settings

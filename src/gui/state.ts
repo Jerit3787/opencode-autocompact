@@ -21,6 +21,9 @@ function versionOf(key: string): number {
 function bump(key: string): void {
   versions.set(key, versionOf(key) + 1)
   inFlight.delete(key)
+  // A save/clear for one key can merge into another key (a project save into
+  // the page payload), so invalidate every in-flight load.
+  epoch += 1
 }
 
 function remember(key: string, payload: SettingsPayload): SettingsPayload {
@@ -31,15 +34,20 @@ function remember(key: string, payload: SettingsPayload): SettingsPayload {
   // the directory-less key. Merge the shared fields so an Add/Save updates the
   // list even if the `changed` event is missed.
   const pageKey = settingsKey(undefined, undefined)
-  if (key !== pageKey && settingsState[pageKey]) {
-    setSettingsState(pageKey, {
-      ...settingsState[pageKey],
-      global: payload.global,
-      projects: payload.projects,
-      settingsPath: payload.settingsPath,
-      degraded: payload.degraded,
-      backupPath: payload.backupPath,
-    })
+  if (key !== pageKey) {
+    // The merge target must not be overwritten by a page load that started
+    // before this save/load.
+    bump(pageKey)
+    if (settingsState[pageKey]) {
+      setSettingsState(pageKey, {
+        ...settingsState[pageKey],
+        global: payload.global,
+        projects: payload.projects,
+        settingsPath: payload.settingsPath,
+        degraded: payload.degraded,
+        backupPath: payload.backupPath,
+      })
+    }
   }
 
   return payload
@@ -115,7 +123,13 @@ export async function saveProject(
   const key = settingsKey(directory, sessionID)
   const payload = (await client(ctx).setProject({ directory, sessionID, threshold })) as SettingsPayload
   bump(key)
-  return remember(key, payload)
+  const result = remember(key, payload)
+
+  const pageKey = settingsKey(undefined, undefined)
+  if (key !== pageKey && !settingsState[pageKey]) {
+    void loadSettings(ctx, {}).catch(() => {})
+  }
+  return result
 }
 
 export async function clearSession(
@@ -130,7 +144,13 @@ export async function clearSession(
     threshold: null,
   })) as SettingsPayload
   bump(key)
-  return remember(key, payload)
+  const result = remember(key, payload)
+
+  const pageKey = settingsKey(undefined, undefined)
+  if (key !== pageKey && !settingsState[pageKey]) {
+    void loadSettings(ctx, {}).catch(() => {})
+  }
+  return result
 }
 
 export function subscribeSettings(ctx: Context): () => void {

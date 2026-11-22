@@ -48,6 +48,34 @@ describe("GUI settings state", () => {
     expect(settingsState[key]?.global).toBe(700_000)
   })
 
+  it("drops a page load that started before a project save", async () => {
+    const pending = deferred<SettingsPayload>()
+    const project = { directory: "/race", threshold: 700_000 }
+    let calls = 0
+    const ctx = {
+      client: {
+        rpc: () => ({
+          get: () => {
+            calls += 1
+            return calls === 1
+              ? pending.promise
+              : Promise.resolve(payload({ projects: [project] }))
+          },
+          setProject: async () => payload({ projects: [project] }),
+          events: { on: () => () => {} },
+        }),
+      },
+    } as never
+
+    const loading = loadSettings(ctx, {})
+    await saveProject(ctx, "/race", undefined, 700_000)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    pending.resolve(payload({ projects: [] }))
+    await loading
+
+    expect(settingsState[settingsKey(undefined, undefined)]?.projects).toContainEqual(project)
+  })
+
   it("merges a project save into the page payload", async () => {
     const project = { directory: "/merge", threshold: 650_000 }
     const ctx = {
