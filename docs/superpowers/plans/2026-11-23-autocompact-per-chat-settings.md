@@ -1200,7 +1200,7 @@ Document:
 
 - Precedence: chat → project → global → plugin config.
 - `/autocompact`, `/autocompact <tokens>`, `/autocompact auto`, `/autocompact compact`.
-- Settings → Autocompact: global default, project override, chat status/reset.
+- Settings → Autocompact: global default and one row per project override; no chat section (chat thresholds use `/autocompact`).
 - Per-chat composer pill.
 - The built-in header ring shows the real model window; the pill is the autocompact indicator.
 - `settingsPath` is a test-only option; don't set it for normal use.
@@ -1264,5 +1264,5 @@ git commit -m "docs: describe per-chat autocompact settings"
   - Metadata merge: Task 1 test.
   - Lowered threshold re-arm: Task 3 test.
   - Cross-process mtime: Task 2 test.
-  - Wrong-project RPC: Task 6 `requestDirectory` test; Task 10 two-project live check.
+  - Wrong-project RPC: Task 6 `requestDirectory` test; Task 10 used two sessions in one project plus a temporary global/project RPC check. A two-project live check remains optional.
 - Tasks 5, 6, and 7-9 are integration/GUI work with typecheck, build, reload, and manual acceptance rather than unit tests; the pure logic they depend on is covered by Tasks 1-4 and 6.

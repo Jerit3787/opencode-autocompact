@@ -14,6 +14,9 @@ export type SettingsPayload = {
   source: ThresholdSource
   enabled: boolean
   projects: SettingsProject[]
+  settingsPath: string
+  degraded: boolean
+  backupPath?: string
 }
 
 const payloadSchema = {
@@ -37,8 +40,21 @@ const payloadSchema = {
         additionalProperties: false,
       },
     },
+    settingsPath: { type: "string" },
+    degraded: { type: "boolean" },
+    backupPath: { type: "string" },
   },
-  required: ["global", "project", "session", "effective", "source", "enabled", "projects"],
+  required: [
+    "global",
+    "project",
+    "session",
+    "effective",
+    "source",
+    "enabled",
+    "projects",
+    "settingsPath",
+    "degraded",
+  ],
   additionalProperties: false,
 } as const
 
@@ -59,6 +75,18 @@ const errors = {
     required: ["message"],
     additionalProperties: false,
   },
+  invalid_directory: {
+    type: "object",
+    properties: { message: { type: "string" } },
+    required: ["message"],
+    additionalProperties: false,
+  },
+  not_found: {
+    type: "object",
+    properties: { sessionID: { type: "string" } },
+    required: ["sessionID"],
+    additionalProperties: false,
+  },
 } as const
 
 export const AutocompactRpc = Rpc.define({
@@ -74,6 +102,7 @@ export const AutocompactRpc = Rpc.define({
         additionalProperties: false,
       },
       output: payloadSchema,
+      errors,
     },
     setGlobal: {
       input: {

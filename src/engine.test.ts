@@ -163,19 +163,6 @@ describe("AutoCompactController", () => {
     expect(controller.snapshot("ses_1").enabled).toBe(false)
   })
 
-  it("applies a new threshold immediately and re-arms for it", () => {
-    const controller = new AutoCompactController({ threshold: 100 })
-    expect(controller.observe("ses_1", 100, 0)).toBe(true)
-
-    controller.requested("ses_1")
-    controller.compactionEnded("ses_1")
-    expect(controller.observe("ses_1", 120, 1)).toBe(false)
-
-    controller.setThreshold(150)
-    expect(controller.threshold).toBe(150)
-    expect(controller.observe("ses_1", 150, 2)).toBe(true)
-  })
-
   it("uses a different threshold per session", () => {
     const controller = new AutoCompactController({ threshold: 100 })
     controller.setSessionThreshold("ses_a", 150)

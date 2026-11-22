@@ -4,7 +4,7 @@ import { autocompactPillView } from "./gui/pill"
 import { AutocompactSettingsPage } from "./gui/settings-page"
 import {
   clearSession,
-  loadSettings,
+  ensureSettings,
   settingsKey,
   settingsState,
   subscribeSettings,
@@ -33,12 +33,17 @@ export default Plugin.define({
       id: "autocompact",
       order: 0,
       show: (input) => {
-        const directory = input.session.directory
+        // The server keys project overrides by canonical project root, not by
+        // a session's workspace subdirectory or worktree checkout.
+        const directory =
+          input.session.project?.worktree ??
+          input.session.listedProject?.worktree ??
+          input.session.directory
         const key = settingsKey(directory, input.session.id)
         const payload = settingsState[key]
 
         if (!payload) {
-          void loadSettings(ctx, { directory, sessionID: input.session.id })
+          void ensureSettings(ctx, { directory, sessionID: input.session.id }).catch(() => {})
           return undefined
         }
 
@@ -53,15 +58,18 @@ export default Plugin.define({
         // The command can change the override without going through the RPC.
         // Refresh before rendering so an old effective value is never shown.
         if (payload.session !== override) {
-          void loadSettings(ctx, { directory, sessionID: input.session.id })
+          void ensureSettings(ctx, { directory, sessionID: input.session.id }, 0).catch(() => {})
           return undefined
         }
+
+        void ensureSettings(ctx, { directory, sessionID: input.session.id }).catch(() => {})
 
         return autocompactPillView({
           session: input.session,
           payload,
           override,
-          onReset: () => void clearSession(ctx, directory, input.session.id),
+          onReset: () =>
+            void clearSession(ctx, directory, input.session.id).catch(() => {}),
         })
       },
     })

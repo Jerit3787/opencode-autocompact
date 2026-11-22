@@ -161,16 +161,6 @@ export class AutoCompactController {
     return this.enabledValue
   }
 
-  /** Change the default trigger size and re-arm sessions without an override. */
-  setThreshold(tokens: number): void {
-    this.thresholdValue = Math.max(1, Math.floor(tokens))
-    for (const session of this.sessions.values()) {
-      if (session.threshold !== undefined || session.pending) continue
-      session.armed = true
-      session.failedAt = undefined
-    }
-  }
-
   /**
    * Set the effective threshold for one session. Re-arms only when the value
    * actually changes, so re-resolving the same threshold on every step does not

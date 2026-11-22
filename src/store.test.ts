@@ -78,6 +78,33 @@ describe("SettingsStore", () => {
     await expect(readFile(file, "utf8")).resolves.toBe("{not json")
   })
 
+  it("refuses to overwrite a corrupt file and keeps a backup", async () => {
+    const { file, store } = await tempStore()
+    await writeFile(file, "{not json", "utf8")
+
+    const state = await store.readState(true)
+    expect(state.degraded).toBe(true)
+    expect(state.backupPath).toBe(`${file}.bak`)
+
+    await expect(store.setGlobal(600_000)).rejects.toThrow(/could not be read/)
+    await expect(store.setProject("/a", 600_000)).rejects.toThrow(/could not be read/)
+    await expect(readFile(file, "utf8")).resolves.toBe("{not json")
+    await expect(readFile(`${file}.bak`, "utf8")).resolves.toBe("{not json")
+  })
+
+  it("adopts a changed config fallback on the shared store", async () => {
+    const { file } = await tempStore()
+    const store = getSettingsStore({
+      path: file,
+      configThreshold: 700_000,
+      now: () => 2_000,
+    })
+    await expect(store.resolve({ directory: "/a" })).resolves.toMatchObject({
+      threshold: 700_000,
+      source: "config",
+    })
+  })
+
   it("picks up an external file change after the mtime throttle", async () => {
     const { file, store, advance } = await tempStore()
     await store.setGlobal(600_000)

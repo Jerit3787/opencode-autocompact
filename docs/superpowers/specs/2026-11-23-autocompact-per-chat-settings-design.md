@@ -142,8 +142,12 @@ Schema:
 
 - Missing file: use the plugin option `threshold` as the fallback global value.
 - A missing `projects` entry or `{ "threshold": null }` means "inherit global".
-- Invalid JSON or invalid values: log a warning, use the fallback, and do not
-  overwrite the file until the user saves from Settings.
+- Invalid JSON, a read failure, or an unreadable file: log a warning, copy the
+  file to `<path>.bak`, use the fallback, and mark the store degraded. A
+  degraded store refuses `setGlobal`/`setProject`, so a save cannot replace an
+  unreadable file with only the one field. The Settings page shows the degraded
+  state and disables saves. Invalid values inside valid JSON are dropped with a
+  warning.
 - Writes are atomic (`write temp in same directory` then `rename`) and
   serialized through a promise queue.
 - Reads are cached by `mtimeMs` + size; every server plugin instance checks the
@@ -225,21 +229,24 @@ plugin instance, because one server process hosts every project location. If
 same-location fallback.
 
 - `get({ directory?: string, sessionID?: string })` →
-  `{ global: number, project: number | null, session: number | null, effective: number, source: "chat" | "project" | "global" | "config", enabled: boolean }`.
+  `{ global: number, project: number | null, session: number | null, effective: number, source: "chat" | "project" | "global" | "config", enabled: boolean, projects: Array<{ directory, threshold }>, settingsPath: string, degraded: boolean, backupPath?: string }`.
   Without a directory, only the global/config values are resolved and
-  `effective` equals the global value.
+  `effective` equals the global value. `projects` lists every project
+  override for the Settings page.
 - `setGlobal({ directory?: string, sessionID?: string, threshold: number })` →
   the same payload as `get` for that caller. The global Settings section works
   without a routed session.
 - `setProject({ directory: string, sessionID?: string, threshold: number | null })` →
   the same payload. `null` means inherit the global value.
 - `setSession({ directory: string, sessionID: string, threshold: number | null })` →
-  the same payload. `null` clears the chat override. The Settings page uses this
-  for the chat reset control; the command calls the same internal function.
+  the same payload. `null` clears the chat override. The composer pill uses this
+  for its reset action; the command calls the same internal function.
 
-Validation: threshold is an integer ≥ 100,000; no upper clamp. Errors are
-declared RPC errors (`invalid_threshold`, `not_found`, `write_failed`) so the
-Settings page can show a row footer message.
+Validation: threshold is an integer ≥ 100,000; no upper clamp. Directories are
+expanded (`~`), required to be absolute, and resolved through `realpath` when
+they exist, so project keys stay canonical. Errors are declared RPC errors
+(`invalid_threshold`, `invalid_directory`, `not_found`, `write_failed`) so the
+Settings page can show the message.
 
 Events:
 
@@ -392,7 +399,8 @@ server-spawn harness:
 GUI checks:
 
 - `npm run typecheck`, `npm test`, `npm run build:gui`.
-- Open Settings and confirm the page renders global/project/chat rows.
+- Open Settings and confirm the page renders the global default and one row per
+  project override, with no chat section.
 - Open two chats with different overrides and confirm the pill shows different
   values and sources.
 - Confirm the built-in ring still shows the real model window.
@@ -405,9 +413,10 @@ GUI checks:
 - Cross-location settings sync is file-mtime based, not push; each instance
   reads on demand.
 - Project identity in worktrees depends on the canonical project directory.
-- The Settings page needs a routed session for the project section; Home/no
-  session editing is deferred.
-- RPC events are live-only; missed events are recovered by refetching on mount.
+- The Settings page works with no routed session; the project list comes from
+  the settings file, not from the current chat.
+- RPC events are live-only; missed events are recovered by refetching on mount,
+  and the page has a manual Refresh action.
 - The built-in ring no longer reflects the autocompact threshold; the pill is
   the source of truth. This is deliberate to avoid the global model-limit lie.
 - Session forks may inherit an override; acceptable but should be documented.
@@ -445,16 +454,18 @@ builder does not have to guess:
    `settingsPath`. No automated server-spawn harness in v1.
 5. **Cross-process writes.** Last-writer-wins with read-modify-write and an
    in-process queue. No cross-process lock; documented as a v1 limitation.
-6. **Migration.** Remove the old per-location storage key after the one-time
-   check in every case, so it cannot resurrect a cleared project override.
+6. **Migration.** Remove the old per-location storage key after a successful
+   one-time check, so it cannot resurrect a cleared project override. If the
+   settings file is unreadable, keep the key and retry on a later start rather
+   than writing over the file.
 
 ## Success criteria
 
 - A chat can set its own threshold without changing other chats.
 - New chats use the project override, then the global default, then the plugin
   config fallback.
-- The Settings page edits global and current-project values and shows the
-  current chat's effective value/source.
+- The Settings page edits the global default and any project override, and
+  works without a routed session.
 - The composer pill shows the per-chat used/threshold and updates as the chat
   grows and as settings change.
 - The built-in header ring continues to show the real model window.

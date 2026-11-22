@@ -1,9 +1,16 @@
-import { For, Show, createEffect, createSignal } from "solid-js"
+import { For, Show, createEffect, createSignal, onMount } from "solid-js"
 import { usePlugin, type Context } from "@opencode/plugin/gui"
 import { parseCommandTokenCount } from "../engine"
 import { MIN_THRESHOLD } from "../settings"
 import { formatTokens } from "../status"
-import { loadSettings, saveGlobal, saveProject, settingsKey, settingsState } from "./state"
+import {
+  loadSettings,
+  refreshSettings,
+  saveGlobal,
+  saveProject,
+  settingsKey,
+  settingsState,
+} from "./state"
 
 const rowStyle = {
   display: "flex",
@@ -23,7 +30,12 @@ function projectName(directory: string): string {
 }
 
 function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause)
+  if (cause instanceof Error) return cause.message
+  if (cause && typeof cause === "object" && "message" in cause) {
+    const message = (cause as { message?: unknown }).message
+    if (typeof message === "string") return message
+  }
+  return String(cause)
 }
 
 function invalidThreshold(): string {
@@ -35,6 +47,7 @@ function ProjectRow(props: {
   directory: string
   threshold: number
   busy: boolean
+  disabled: boolean
   onSave: (directory: string, raw: string) => void
   onClear: (directory: string) => void
 }) {
@@ -55,11 +68,13 @@ function ProjectRow(props: {
             onInput={setText}
             onSubmit={() => props.onSave(props.directory, text())}
             placeholder="Use global"
+            disabled={props.disabled}
           />
         </div>
         <props.ui.Button
           variant="neutral"
           size="small"
+          disabled={props.disabled}
           busy={props.busy}
           onClick={() => props.onSave(props.directory, text())}
         >
@@ -68,7 +83,7 @@ function ProjectRow(props: {
         <props.ui.Button
           variant="ghost"
           size="small"
-          disabled={props.busy}
+          disabled={props.disabled || props.busy}
           onClick={() => props.onClear(props.directory)}
         >
           Use global
@@ -88,6 +103,27 @@ export function AutocompactSettingsPage() {
 
   const current = () => settingsState[settingsKey(undefined, undefined)]
   const projects = () => current()?.projects ?? []
+  const degraded = () => current()?.degraded === true
+
+  const refresh = async () => {
+    setBusy("refresh")
+    try {
+      await refreshSettings(ctx, {})
+      setError(undefined)
+    } catch (cause) {
+      setError(messageOf(cause))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  onMount(() => {
+    // Always refetch on mount: a missed `changed` event must not leave the
+    // page showing values from an earlier session.
+    void refreshSettings(ctx, {})
+      .then(() => setError(undefined))
+      .catch((cause) => setError(messageOf(cause)))
+  })
 
   createEffect(() => {
     // A `changed` event clears the store; refetch instead of showing an
@@ -102,7 +138,14 @@ export function AutocompactSettingsPage() {
     if (payload) setGlobalText(compact(payload.global))
   })
 
+  const blocked = (): boolean => {
+    if (!degraded()) return false
+    setError("The settings file could not be read, so it was not changed.")
+    return true
+  }
+
   const saveGlobalValue = async () => {
+    if (blocked()) return
     const tokens = parseCommandTokenCount(globalText())
     if (tokens === undefined || tokens < MIN_THRESHOLD) {
       setError(invalidThreshold())
@@ -122,6 +165,7 @@ export function AutocompactSettingsPage() {
   }
 
   const saveProjectValue = async (directory: string, raw: string) => {
+    if (blocked()) return
     const tokens = parseCommandTokenCount(raw)
     if (tokens === undefined || tokens < MIN_THRESHOLD) {
       setError(invalidThreshold())
@@ -140,6 +184,7 @@ export function AutocompactSettingsPage() {
   }
 
   const useGlobal = async (directory: string) => {
+    if (blocked()) return
     setError(undefined)
     setBusy(directory)
     try {
@@ -152,16 +197,22 @@ export function AutocompactSettingsPage() {
   }
 
   const addProject = async () => {
+    if (blocked()) return
     const directory = newProject().trim()
     const fallback = current()?.global
     if (!directory || fallback === undefined) {
-      setError("Enter a project directory, for example /Users/you/project.")
+      setError("Enter an absolute project directory, for example /Users/you/project.")
       return
     }
 
     setError(undefined)
     setBusy("new")
     try {
+      const existing = await loadSettings(ctx, { directory }, true)
+      if (existing.project !== null) {
+        setError("That project already has an override. Edit its row instead.")
+        return
+      }
       await saveProject(ctx, directory, undefined, fallback)
       setNewProject("")
     } catch (cause) {
@@ -173,8 +224,18 @@ export function AutocompactSettingsPage() {
 
   return (
     <ui.SettingsLayout
-      title="Autocompact"
-      description="Choose when OpenCode summarizes context."
+      title={ctx.t("page.title")}
+      description={ctx.t("page.description")}
+      actions={
+        <ui.Button
+          variant="neutral"
+          size="small"
+          busy={busy() === "refresh"}
+          onClick={() => void refresh()}
+        >
+          Refresh
+        </ui.Button>
+      }
     >
       <Show when={error()}>
         {(message) => (
@@ -190,6 +251,20 @@ export function AutocompactSettingsPage() {
         )}
       </Show>
 
+      <Show when={degraded()}>
+        <div
+          style={{
+            color: "var(--v2-text-text-warning, #d98b0d)",
+            "font-size": "12px",
+            "padding-bottom": "8px",
+          }}
+        >
+          The settings file could not be read, so saves are disabled. Fix or remove{" "}
+          {current()?.settingsPath}
+          {current()?.backupPath ? `; a backup is at ${current()?.backupPath}` : ""}.
+        </div>
+      </Show>
+
       <ui.SettingsSection title="Global default">
         <ui.SettingsRow
           title="Default threshold"
@@ -203,11 +278,13 @@ export function AutocompactSettingsPage() {
                 onInput={setGlobalText}
                 onSubmit={() => void saveGlobalValue()}
                 placeholder="500k"
+                disabled={degraded()}
               />
             </div>
             <ui.Button
               variant="neutral"
               size="small"
+              disabled={degraded()}
               busy={busy() === "global"}
               onClick={() => void saveGlobalValue()}
             >
@@ -225,6 +302,7 @@ export function AutocompactSettingsPage() {
               directory={project.directory}
               threshold={project.threshold}
               busy={busy() === project.directory}
+              disabled={degraded()}
               onSave={(directory, raw) => void saveProjectValue(directory, raw)}
               onClear={(directory) => void useGlobal(directory)}
             />
@@ -232,7 +310,7 @@ export function AutocompactSettingsPage() {
         </For>
         <ui.SettingsRow
           title="Add project"
-          description="Add a directory, then edit its threshold above."
+          description="Add an absolute directory, then edit its threshold above. Project keys are canonical."
         >
           <div style={rowStyle}>
             <div style={fieldStyle}>
@@ -242,12 +320,13 @@ export function AutocompactSettingsPage() {
                 onInput={setNewProject}
                 onSubmit={() => void addProject()}
                 placeholder="/Users/you/project"
+                disabled={degraded()}
               />
             </div>
             <ui.Button
               variant="neutral"
               size="small"
-              disabled={!newProject().trim()}
+              disabled={degraded() || !newProject().trim()}
               busy={busy() === "new"}
               onClick={() => void addProject()}
             >

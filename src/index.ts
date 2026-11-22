@@ -1,3 +1,6 @@
+import { realpath } from "node:fs/promises"
+import { homedir } from "node:os"
+import path from "node:path"
 import { Plugin } from "@opencode/plugin"
 import {
   AutoCompactController,
@@ -8,7 +11,7 @@ import {
   parseTokenCount,
   type AutoCompactAction,
 } from "./engine"
-import { AutocompactRpc, requestDirectory, type SettingsPayload } from "./rpc"
+import { AutocompactRpc, type SettingsPayload } from "./rpc"
 import { isValidThreshold, MIN_THRESHOLD, readSessionOverride, withSessionOverride } from "./settings"
 import { formatStatus, formatTokens } from "./status"
 import { defaultSettingsPath, getSettingsStore } from "./store"
@@ -54,6 +57,27 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** Expand `~`, require an absolute path, and resolve symlinks when it exists. */
+async function canonicalDirectory(value: string): Promise<string | undefined> {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+
+  const expanded =
+    trimmed === "~"
+      ? homedir()
+      : trimmed.startsWith("~/")
+        ? path.join(homedir(), trimmed.slice(2))
+        : trimmed
+  if (!path.isAbsolute(expanded)) return undefined
+
+  const resolved = path.resolve(expanded)
+  try {
+    return await realpath(resolved)
+  } catch {
+    return resolved
+  }
+}
+
 function normalizeAction(value: string | undefined): AutoCompactAction | undefined {
   switch (value) {
     case "status":
@@ -69,7 +93,10 @@ function normalizeAction(value: string | undefined): AutoCompactAction | undefin
 export default Plugin.define({
   id: "autocompact",
   async setup(ctx) {
-    const configThreshold = parseTokenCount(ctx.options.threshold, DEFAULT_THRESHOLD)
+    const configThreshold = Math.max(
+      MIN_THRESHOLD,
+      parseTokenCount(ctx.options.threshold, DEFAULT_THRESHOLD),
+    )
     const configEnabled = ctx.options.enabled !== false
     const settingsPath =
       typeof ctx.options.settingsPath === "string" && ctx.options.settingsPath.length > 0
@@ -79,19 +106,24 @@ export default Plugin.define({
     const canonical = String(ctx.location.project.canonical)
 
     try {
-      const legacy = await ctx.storage.get(LEGACY_SETTINGS_KEY)
-      if (legacy && typeof legacy === "object" && !Array.isArray(legacy)) {
-        const raw = (legacy as Record<string, unknown>).threshold
-        if (
-          typeof raw === "number" &&
-          Number.isFinite(raw) &&
-          raw > 0 &&
-          (await store.getProject(canonical)) === null
-        ) {
-          await store.setProject(canonical, Math.floor(raw))
+      const state = await store.readState()
+      if (state.degraded) {
+        console.warn(
+          "[autocompact] settings file is unreadable; skipping migration and keeping the legacy key:",
+          state.reason,
+        )
+      } else {
+        const legacy = await ctx.storage.get(LEGACY_SETTINGS_KEY)
+        if (legacy && typeof legacy === "object" && !Array.isArray(legacy)) {
+          const raw = (legacy as Record<string, unknown>).threshold
+          if (raw !== undefined && !isValidThreshold(raw)) {
+            console.warn("[autocompact] ignoring invalid legacy threshold:", raw)
+          } else if (isValidThreshold(raw) && (await store.getProject(canonical)) === null) {
+            await store.setProject(canonical, raw)
+          }
         }
+        await ctx.storage.remove(LEGACY_SETTINGS_KEY)
       }
-      await ctx.storage.remove(LEGACY_SETTINGS_KEY)
     } catch (error) {
       console.warn("[autocompact] could not migrate saved settings:", error)
     }
@@ -135,16 +167,17 @@ export default Plugin.define({
       directory?: string
       sessionID?: string
     }): Promise<SettingsPayload> => {
-      const directory = requestDirectory(input, canonical)
+      const requested = input.directory?.trim()
+      const directory = requested ? await canonicalDirectory(requested) : undefined
       const session = input.sessionID
         ? await ctx.session.get({ sessionID: input.sessionID })
         : undefined
       const override = session ? readSessionOverride(session.metadata) : null
-      const [resolved, data] = await Promise.all([
+      const [resolved, state] = await Promise.all([
         store.resolve({ directory, session: override }),
-        store.read(),
+        store.readState(),
       ])
-      const projects = Object.entries(data.projects)
+      const projects = Object.entries(state.data.projects)
         .flatMap(([project, entry]) =>
           typeof entry.threshold === "number"
             ? [{ directory: project, threshold: entry.threshold }]
@@ -160,6 +193,9 @@ export default Plugin.define({
         source: resolved.source,
         enabled: configEnabled,
         projects,
+        settingsPath,
+        degraded: state.degraded,
+        ...(state.backupPath ? { backupPath: state.backupPath } : {}),
       }
     }
 
@@ -167,6 +203,15 @@ export default Plugin.define({
       directory?: string
       sessionID?: string
     }) => Promise<void> = async () => {}
+
+    const refreshSession = async (sessionID: string | undefined, directory?: string) => {
+      if (!sessionID) return
+      try {
+        await applySessionThreshold(sessionID, directory)
+      } catch (error) {
+        console.warn(`[autocompact] could not refresh the threshold for ${sessionID}:`, error)
+      }
+    }
 
     const requestCompaction = async (sessionID: string, observed: number): Promise<boolean> => {
       controller.requested(sessionID)
@@ -228,9 +273,13 @@ export default Plugin.define({
         sessionID,
         metadata: withSessionOverride(session.metadata, tokens) as Parameters<typeof ctx.session.update>[0]["metadata"],
       })
-      await applySessionThreshold(sessionID, directory)
+      await refreshSession(sessionID, directory)
       await notifyChanged({ directory, sessionID })
-      return statusFor(sessionID, directory)
+      try {
+        return await statusFor(sessionID, directory)
+      } catch (error) {
+        return `Chat threshold set to ${formatTokens(tokens)} tokens. The status could not be read: ${errorText(error)}`
+      }
     }
 
     const resetThresholdFor = async (sessionID: string, directory = canonical): Promise<string> => {
@@ -239,9 +288,13 @@ export default Plugin.define({
         sessionID,
         metadata: withSessionOverride(session.metadata, null) as Parameters<typeof ctx.session.update>[0]["metadata"],
       })
-      await applySessionThreshold(sessionID, directory)
+      await refreshSession(sessionID, directory)
       await notifyChanged({ directory, sessionID })
-      return statusFor(sessionID, directory)
+      try {
+        return await statusFor(sessionID, directory)
+      } catch (error) {
+        return `Chat threshold cleared. The status could not be read: ${errorText(error)}`
+      }
     }
 
     const compactNow = async (sessionID: string): Promise<string> => {
@@ -347,7 +400,17 @@ export default Plugin.define({
     })()
 
     const registration = await ctx.rpc.register(AutocompactRpc, {
-      get: async (input) => payloadFor(input as { directory?: string; sessionID?: string }),
+      get: async (input, context) => {
+        const value = input as { directory?: string; sessionID?: string }
+        try {
+          return await payloadFor(value)
+        } catch (error) {
+          if (!value.sessionID) throw error
+          return context.error("not_found", `Session not found: ${value.sessionID}`, {
+            sessionID: value.sessionID,
+          })
+        }
+      },
       setGlobal: async (input, context) => {
         const value = input as { directory?: string; sessionID?: string; threshold: number }
         if (!isValidThreshold(value.threshold)) {
@@ -358,16 +421,18 @@ export default Plugin.define({
           )
         }
 
-        const directory = requestDirectory(value, canonical)
+        const directory = value.directory
+          ? await canonicalDirectory(value.directory)
+          : canonical
         try {
           await store.setGlobal(value.threshold)
-          if (value.sessionID) await applySessionThreshold(value.sessionID, directory)
         } catch (error) {
           return context.error("write_failed", errorText(error), { message: errorText(error) })
         }
 
+        await refreshSession(value.sessionID, directory)
         await notifyChanged({ directory, sessionID: value.sessionID })
-        return payloadFor({ directory, sessionID: value.sessionID })
+        return payloadFor({ directory: value.directory, sessionID: value.sessionID })
       },
       setProject: async (input, context) => {
         const value = input as {
@@ -383,14 +448,22 @@ export default Plugin.define({
           )
         }
 
-        const directory = requestDirectory(value, canonical)
+        const directory = await canonicalDirectory(value.directory)
+        if (!directory) {
+          return context.error(
+            "invalid_directory",
+            "Project directory must be an absolute path.",
+            { message: "Project directory must be an absolute path." },
+          )
+        }
+
         try {
           await store.setProject(directory, value.threshold)
-          if (value.sessionID) await applySessionThreshold(value.sessionID, directory)
         } catch (error) {
           return context.error("write_failed", errorText(error), { message: errorText(error) })
         }
 
+        await refreshSession(value.sessionID, directory)
         await notifyChanged({ directory, sessionID: value.sessionID })
         return payloadFor({ directory, sessionID: value.sessionID })
       },
@@ -408,30 +481,51 @@ export default Plugin.define({
           )
         }
 
-        const directory = requestDirectory(value, canonical)
+        const directory = await canonicalDirectory(value.directory)
+        if (!directory) {
+          return context.error(
+            "invalid_directory",
+            "Project directory must be an absolute path.",
+            { message: "Project directory must be an absolute path." },
+          )
+        }
+
+        let session
         try {
-          const session = await ctx.session.get({ sessionID: value.sessionID })
+          session = await ctx.session.get({ sessionID: value.sessionID })
+        } catch {
+          return context.error("not_found", `Session not found: ${value.sessionID}`, {
+            sessionID: value.sessionID,
+          })
+        }
+
+        try {
           await ctx.session.update({
             sessionID: value.sessionID,
             metadata: withSessionOverride(session.metadata, value.threshold) as Parameters<
               typeof ctx.session.update
             >[0]["metadata"],
           })
-          await applySessionThreshold(value.sessionID, directory)
         } catch (error) {
           return context.error("write_failed", errorText(error), { message: errorText(error) })
         }
 
+        await refreshSession(value.sessionID, directory)
         await notifyChanged({ directory, sessionID: value.sessionID })
         return payloadFor({ directory, sessionID: value.sessionID })
       },
     })
 
-    notifyChanged = (input) =>
-      registration.events.emit("changed", {
-        ...(input.directory ? { directory: input.directory } : {}),
-        ...(input.sessionID ? { sessionID: input.sessionID } : {}),
-      })
+    notifyChanged = async (input) => {
+      try {
+        await registration.events.emit("changed", {
+          ...(input.directory ? { directory: input.directory } : {}),
+          ...(input.sessionID ? { sessionID: input.sessionID } : {}),
+        })
+      } catch (error) {
+        console.warn("[autocompact] could not emit the settings change event:", error)
+      }
+    }
 
     await ctx.command.transform((editor) => {
       editor.add({

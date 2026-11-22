@@ -30,6 +30,8 @@ const payload = {
   source: "project" as const,
   enabled: true,
   projects: [],
+  settingsPath: "/tmp/autocompact.json",
+  degraded: false,
 }
 
 describe("autocompactPillView", () => {

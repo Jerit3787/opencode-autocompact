@@ -11,7 +11,7 @@ export type AutocompactPillView = {
 }
 
 function format(value: number): string {
-  return new Intl.NumberFormat(undefined, {
+  return new Intl.NumberFormat("en-US", {
     notation: "compact",
     maximumFractionDigits: 0,
   })

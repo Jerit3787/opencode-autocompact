@@ -92,8 +92,17 @@ options. The tool and `/autocompact compact` still work.
 - Chat thresholds are not edited on this page. Use `/autocompact` in the chat,
   or reset from the composer pill.
 
+Project keys are canonical absolute directories. A worktree session or a
+session opened in a project subfolder resolves to its project root's override,
+not to the worktree path. **Add project** accepts `~`, requires an absolute
+path, and resolves symlinks, so the key matches the project the server uses.
+
 The settings file is read with an mtime/size cache checked at most once per
-second. Writes are atomic (`temp` + rename) and serialized in-process.
+second. Writes are atomic (`temp` + rename) and serialized in-process. If the
+file cannot be read or parsed, the plugin copies it to
+`~/.config/opencode/autocompact.json.bak`, shows a warning in Settings, and
+refuses to save until the file is fixed or removed; a save cannot silently
+replace the other project entries with a partial file.
 
 ## Composer pill
 
@@ -136,8 +145,14 @@ Example: fall back to 300k and retry failures after one minute.
 Older versions stored one threshold per location in plugin storage. On the
 first start after upgrading, if that value exists and the project has no entry
 in `autocompact.json`, the plugin writes it as that project's override. The old
-storage key is removed either way, so clearing the project override later
-cannot resurrect the old value.
+storage key is removed after that check, so clearing the project override later
+cannot resurrect the old value. If `autocompact.json` is unreadable, migration
+is skipped and the old key is kept for a later start rather than risking the
+file.
+
+Cross-process writes are last-writer-wins with a read-modify-write and an
+in-process queue; there is no cross-process lock. Session forks inherit the
+chat override.
 
 ## Tool
 
