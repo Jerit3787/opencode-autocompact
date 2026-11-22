@@ -8,7 +8,8 @@ import {
   parseTokenCount,
   type AutoCompactAction,
 } from "./engine"
-import { MIN_THRESHOLD, readSessionOverride, withSessionOverride } from "./settings"
+import { AutocompactRpc, requestDirectory, type SettingsPayload } from "./rpc"
+import { isValidThreshold, MIN_THRESHOLD, readSessionOverride, withSessionOverride } from "./settings"
 import { formatStatus, formatTokens } from "./status"
 import { defaultSettingsPath, getSettingsStore } from "./store"
 
@@ -130,6 +131,31 @@ export default Plugin.define({
       return resolved
     }
 
+    const payloadFor = async (input: {
+      directory?: string
+      sessionID?: string
+    }): Promise<SettingsPayload> => {
+      const directory = requestDirectory(input, canonical)
+      const session = input.sessionID
+        ? await ctx.session.get({ sessionID: input.sessionID })
+        : undefined
+      const override = session ? readSessionOverride(session.metadata) : null
+      const resolved = await store.resolve({ directory, session: override })
+      return {
+        global: resolved.global,
+        project: resolved.project,
+        session: resolved.session,
+        effective: resolved.threshold,
+        source: resolved.source,
+        enabled: configEnabled,
+      }
+    }
+
+    let notifyChanged: (input: {
+      directory?: string
+      sessionID?: string
+    }) => Promise<void> = async () => {}
+
     const requestCompaction = async (sessionID: string, observed: number): Promise<boolean> => {
       controller.requested(sessionID)
       try {
@@ -191,6 +217,7 @@ export default Plugin.define({
         metadata: withSessionOverride(session.metadata, tokens) as Parameters<typeof ctx.session.update>[0]["metadata"],
       })
       await applySessionThreshold(sessionID, directory)
+      await notifyChanged({ directory, sessionID })
       return statusFor(sessionID, directory)
     }
 
@@ -201,6 +228,7 @@ export default Plugin.define({
         metadata: withSessionOverride(session.metadata, null) as Parameters<typeof ctx.session.update>[0]["metadata"],
       })
       await applySessionThreshold(sessionID, directory)
+      await notifyChanged({ directory, sessionID })
       return statusFor(sessionID, directory)
     }
 
@@ -305,6 +333,89 @@ export default Plugin.define({
         }
       }
     })()
+
+    const registration = await ctx.rpc.register(AutocompactRpc, {
+      get: async (input) => payloadFor(input as { directory?: string; sessionID?: string }),
+      setGlobal: async (input, context) => {
+        const value = input as { directory?: string; sessionID?: string; threshold: number }
+        if (!isValidThreshold(value.threshold)) {
+          return context.error(
+            "invalid_threshold",
+            `Threshold must be at least ${formatTokens(MIN_THRESHOLD)} tokens`,
+            { minimum: MIN_THRESHOLD },
+          )
+        }
+
+        const directory = requestDirectory(value, canonical)
+        try {
+          await store.setGlobal(value.threshold)
+          if (value.sessionID) await applySessionThreshold(value.sessionID, directory)
+        } catch (error) {
+          return context.error("write_failed", errorText(error), { message: errorText(error) })
+        }
+
+        await notifyChanged({ directory, sessionID: value.sessionID })
+        return payloadFor({ directory, sessionID: value.sessionID })
+      },
+      setProject: async (input, context) => {
+        const value = input as {
+          directory: string
+          sessionID?: string
+          threshold: number | null
+        }
+        if (value.threshold !== null && !isValidThreshold(value.threshold)) {
+          return context.error(
+            "invalid_threshold",
+            `Threshold must be at least ${formatTokens(MIN_THRESHOLD)} tokens`,
+            { minimum: MIN_THRESHOLD },
+          )
+        }
+
+        const directory = requestDirectory(value, canonical)
+        try {
+          await store.setProject(directory, value.threshold)
+          if (value.sessionID) await applySessionThreshold(value.sessionID, directory)
+        } catch (error) {
+          return context.error("write_failed", errorText(error), { message: errorText(error) })
+        }
+
+        await notifyChanged({ directory, sessionID: value.sessionID })
+        return payloadFor({ directory, sessionID: value.sessionID })
+      },
+      setSession: async (input, context) => {
+        const value = input as {
+          directory: string
+          sessionID: string
+          threshold: number | null
+        }
+        if (value.threshold !== null && !isValidThreshold(value.threshold)) {
+          return context.error(
+            "invalid_threshold",
+            `Threshold must be at least ${formatTokens(MIN_THRESHOLD)} tokens`,
+            { minimum: MIN_THRESHOLD },
+          )
+        }
+
+        const directory = requestDirectory(value, canonical)
+        try {
+          const session = await ctx.session.get({ sessionID: value.sessionID })
+          await ctx.session.update({
+            sessionID: value.sessionID,
+            metadata: withSessionOverride(session.metadata, value.threshold) as Parameters<
+              typeof ctx.session.update
+            >[0]["metadata"],
+          })
+          await applySessionThreshold(value.sessionID, directory)
+        } catch (error) {
+          return context.error("write_failed", errorText(error), { message: errorText(error) })
+        }
+
+        await notifyChanged({ directory, sessionID: value.sessionID })
+        return payloadFor({ directory, sessionID: value.sessionID })
+      },
+    })
+
+    notifyChanged = (input) => registration.events.emit("changed", input)
 
     await ctx.command.transform((editor) => {
       editor.add({
