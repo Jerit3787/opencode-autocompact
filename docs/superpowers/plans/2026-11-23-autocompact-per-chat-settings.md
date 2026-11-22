@@ -765,6 +765,10 @@ git commit -m "feat: resolve autocompact thresholds per chat, project, and globa
 - Consumes: `SettingsStore`, `isValidThreshold`, `readSessionOverride`, `withSessionOverride`, `ThresholdSource`.
 - Produces:
   ```ts
+  export type SettingsProject = {
+    directory: string
+    threshold: number
+  }
   export type SettingsPayload = {
     global: number
     project: number | null
@@ -772,6 +776,7 @@ git commit -m "feat: resolve autocompact thresholds per chat, project, and globa
     effective: number
     source: ThresholdSource
     enabled: boolean
+    projects: SettingsProject[]
   }
   export const AutocompactRpc = Rpc.define({ ... })
   export function requestDirectory(input: { directory?: string }, fallback: string): string
@@ -786,7 +791,7 @@ Create `src/rpc.ts` with `Rpc.define` id `autocompact`. Use JSON Schema:
 - `setGlobal`: input `{ directory?: string, sessionID?: string, threshold: number }`.
 - `setProject`: input `{ directory: string, sessionID?: string, threshold: number | null }`.
 - `setSession`: input `{ directory: string, sessionID: string, threshold: number | null }`.
-- Each method outputs `SettingsPayload`: `global` number, `project` number|null, `session` number|null, `effective` number, `source` enum, `enabled` boolean.
+- Each method outputs `SettingsPayload`: `global` number, `project` number|null, `session` number|null, `effective` number, `source` enum, `enabled` boolean, and `projects` as an array of `{ directory, threshold }` for every project override.
 - Errors: `invalid_threshold` with `{ minimum: number }`, `write_failed` with `{ message: string }`.
 - Event `changed` with `{ directory?: string, sessionID?: string }`.
 - Export `requestDirectory(input, fallback)`: trimmed `input.directory` or fallback.
@@ -999,18 +1004,15 @@ git commit -m "build: add desktop GUI plugin bundle"
 
 Export `AutocompactSettingsPage`. Use `usePlugin()` and `ctx.ui`.
 
-- Read the routed session: `ctx.sessions.current()`.
-- `directory = session?.project?.canonical ?? session?.directory`. If the
-  installed `Project` type has no `canonical`, use `session.directory` for v1
-  and document the worktree limitation.
-- `sessionID = session?.id`.
-- Load `loadSettings` on mount and whenever the routed session key changes; use `createEffect` with a keyed accessor.
-- Render `ui.SettingsLayout` title "Autocompact" with three sections:
+- The page does not depend on a routed session. The Settings screen unmounts
+  the routed session, so `ctx.sessions.current()` is undefined there.
+- Load `loadSettings(ctx, {})`; when a `changed` event clears the store, refetch
+  instead of leaving the page empty.
+- Render `ui.SettingsLayout` title "Autocompact" with two sections:
   - **Global default**: a `ui.TextInput` with value (compact string such as `500k`) and a `ui.Button` Save. Parse with `parseCommandTokenCount`; reject values below `MIN_THRESHOLD`; call `saveGlobal`.
-  - **This project**: a `ui.TextInput` + Save plus a **Use global** button; call `saveProject(directory, ..., value | null)`. Disable when no session, with a note.
-  - **This chat**: show effective threshold, source, and a **Reset chat override** button calling `clearSession(directory, sessionID)`. Disable when no session.
-- Show a footer error on invalid input or RPC failure.
-- Use getters/reactive reads for session data; do not read `ctx.sessions.current()` once in setup.
+  - **Projects**: a row for every `projects` entry from the payload, sorted by directory. Each row has a `ui.TextInput`, Save, and **Use global** calling `saveProject(directory, ..., value | null)`. End the section with an **Add project** row (directory input + Add) seeded with the current global value.
+- No chat section: chat thresholds are set with `/autocompact`; the pill shows and resets the chat override.
+- Show an error above the sections on invalid input or RPC failure.
 
 - [ ] **Step 3: Wire the page in `src/gui.tsx`**
 
@@ -1054,7 +1056,7 @@ Expected: PASS.
 - [ ] **Step 5: Reload and check the page**
 
 Run: `"$OC" reload`
-Open **Settings → Autocompact**. Expected: global/project/chat sections render; global works without a session; project/chat show a note when no session is routed.
+Open **Settings → Autocompact**. Expected: the global default and one row per project override render; each row saves and can be cleared to the global value; **Add project** adds a row; no chat section is present. Live check: a `setProject` RPC for `/private/tmp` to 650,000 refreshed the open page to 650k, then 600,000 restored it.
 
 - [ ] **Step 6: Commit**
 

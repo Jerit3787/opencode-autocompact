@@ -282,20 +282,18 @@ is the server id `autocompact`, which is not reserved.
 `ctx.add(SettingsPage, ...)` with a page of its own:
 
 - id `autocompact`, title "Autocompact", icon `status`.
-- **Global default**: a `Select` of presets (`300k`, `500k`, `700k`, `800k`,
-  `1M`, `Custom`) plus a `TextInput` for custom. Save via RPC; show a footer
-  error for invalid values.
-- **This project**: `Use global (500k)` or a custom value. Use the routed
-  session's project directory (`ctx.sessions.current()?.project?.canonical ??
-  ctx.sessions.current()?.directory`). If no session is routed, show a note that
-  a chat must be open to edit project settings, and keep the global section
-  usable.
-- **This chat**: effective threshold, source, current context, and a
-  **Reset chat override** button (RPC `setSession` with `null`). Only when a
-  session is routed.
-- Use `ctx.ui.SettingsLayout`, `SettingsSection`, `SettingsRow`, `Select`,
-  `TextInput`, `Button`, and `Switch` as appropriate. The page must react to
-  session changes, not read `ctx.sessions.current()` once in setup.
+- **Global default**: a `TextInput` with a compact value such as `500k`, plus
+  Save. Save via RPC; show an error for invalid values.
+- **Projects**: one row for every project override in
+  `~/.config/opencode/autocompact.json`, sorted by directory. Each row has an
+  editable threshold, Save, and **Use global** (RPC `setProject` with `null`).
+- **Add project**: a directory `TextInput` and Add; the new project starts at
+  the current global value and then gets its own editable row.
+- No chat section. Chat thresholds are set with `/autocompact` in that chat;
+  the composer pill shows the effective value and can reset the override.
+- Use `ctx.ui.SettingsLayout`, `SettingsSection`, `SettingsRow`, `TextInput`,
+  and `Button`. The page must work with no routed session: the Settings screen
+  unmounts the routed session, so `ctx.sessions.current()` is undefined there.
 
 ### Composer pill
 
