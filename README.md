@@ -1,7 +1,8 @@
 # opencode-autocompact
 
-An OpenCode server plugin that compacts a session when its context reaches an
-absolute token threshold — 500,000 tokens by default.
+An OpenCode plugin that compacts a session when its context reaches an absolute
+token threshold — 500,000 tokens by default. The threshold can differ per chat,
+per project, and globally.
 
 OpenCode's built-in compaction is window-relative (`compaction.buffer`), so the
 absolute point where it fires changes with the model. This plugin watches the
@@ -12,11 +13,13 @@ when that size crosses a fixed line.
 
 - Listens for `session.step.ended` events and sums the step's usage:
   `input + output + reasoning + cache.read + cache.write`.
+- Resolves each chat's threshold with this precedence:
+  **chat → project → global → plugin config**.
 - Leaves `model.limit.context` at the provider's real value, so OpenCode's
   context ring and Context panel show the real model window. Autocompact status
   comes from `/autocompact` and the composer pill.
-- At `threshold` tokens, requests `session.compact`. OpenCode runs it at the
-  next step boundary, before the next model call.
+- At the effective threshold, requests `session.compact`. OpenCode runs it at
+  the next step boundary, before the next model call.
 - Triggers once per crossing. After compaction it re-arms only when the context
   drops below the threshold, so a compaction that cannot shrink the conversation
   (for example, mostly fixed instructions) cannot loop.
@@ -49,8 +52,8 @@ auto-compaction so it cannot fire first:
 ```
 
 For any other machine, point `package` at this directory (or publish the
-package) and reload OpenCode. No build step is needed; the plugin entry is
-TypeScript.
+package) and reload OpenCode. The server entry is TypeScript; the desktop GUI
+entry is the committed `dist/gui-experimental.cjs`.
 
 Leave `compaction.buffer` at its default positive reserve. Setting it to `0`
 makes the compaction request measure its input at the whole window, which
@@ -63,41 +66,56 @@ The plugin registers `/autocompact`:
 
 | Command | Behavior |
 | --- | --- |
-| `/autocompact` | Show the threshold, current context, and whether compaction is armed, pending, paused, or disabled. |
-| `/autocompact 500k` | Set the threshold. Also accepts `500000`, `1M`, or a bare `300` (meaning 300,000). Minimum 100,000. |
-| `/autocompact auto` | Remove the saved override and use the plugin's configured `threshold`, with automatic compaction still on. |
+| `/autocompact` | Show the effective threshold and its source, current context, and whether compaction is armed, pending, paused, or disabled. |
+| `/autocompact 500k` | Set this chat's threshold. Also accepts `500000`, `1M`, or a bare `300` (meaning 300,000). Minimum 100,000. |
+| `/autocompact auto` | Clear this chat's override and fall back to the project, global, or plugin config value. |
 | `/autocompact compact` | Request compaction now; it runs at the next step boundary. |
 
-To disable automatic triggering entirely, set `enabled: false` in the plugin
-options (the equivalent of Claude Code's separate auto-compact setting). The
-tool and `/autocompact compact` still work.
-
-Threshold changes take effect immediately and are saved in plugin storage, which
-takes precedence over the `threshold` option. `/autocompact auto` clears the
-saved value and restores the configured one.
+A chat override is stored in `session.metadata.autocompact.threshold`, so it
+travels with that chat. Status reports the source (`chat`, `project`, `global`,
+or `config`) and the global/project fallbacks when they apply.
 
 The command posts its result as a session notice. Notices are delivered on the
 next turn, so running `/autocompact` does not spend a model call by itself.
 
-The header context ring and Context panel now measure against the threshold:
-with a 500k threshold, 300k tokens reads as 60%, not 30% of 1M. `/autocompact
-700k` changes the ring to a 700k ceiling; `/autocompact auto` returns to the
-configured 500k. Setting `enabled: false` removes the cap and restores the
-provider's real window.
+To disable automatic triggering entirely, set `enabled: false` in the plugin
+options. The tool and `/autocompact compact` still work.
 
-Status and threshold changes show the active model's context window and warn
-when the threshold is at or above it. For example, 500k is fine on a 1M model,
-but a 200k model would hit its limit before the threshold fires.
+## Settings
+
+**Settings → Autocompact** edits values that apply across chats:
+
+- **Global default** — used when a project has no override.
+- **Projects** — one row for every project in `~/.config/opencode/autocompact.json`,
+  with Save and **Use global** to clear the override. **Add project** adds a
+  directory at the current global value, then the row can be edited.
+- Chat thresholds are not edited on this page. Use `/autocompact` in the chat,
+  or reset from the composer pill.
+
+The settings file is read with an mtime/size cache checked at most once per
+second. Writes are atomic (`temp` + rename) and serialized in-process.
+
+## Composer pill
+
+A pill above the composer shows the chat's current context against its
+effective threshold, for example `253k / 600k`. It turns warning-colored at 80%
+and danger-colored at 90%. Its rows show the source, the global value, the
+project value, and a **Reset chat override** action when the chat has one. The
+pill refetches after `/autocompact` and after settings changes.
+
+The built-in header ring remains the model-window indicator; the pill is the
+autocompact indicator.
 
 ## Options
 
 | Option         | Default  | Meaning                                                              |
 | -------------- | -------- | -------------------------------------------------------------------- |
-| `threshold`    | `500000` | Conversation size that triggers compaction. Accepts `500000`, `"500k"`, or `"1m"`. |
+| `threshold`    | `500000` | Fallback threshold when no chat, project, or global value applies. Accepts `500000`, `"500k"`, or `"1m"`. |
 | `enabled`      | `true`   | Set to `false` to keep the tool available but disable automatic compaction. |
 | `retryAfterMs` | `300000` | Backoff after a failed compaction before another attempt.            |
+| `settingsPath` | unset    | Test-only override for `~/.config/opencode/autocompact.json`. Do not set it for normal use. |
 
-Example: compact at 300k and retry failures after one minute.
+Example: fall back to 300k and retry failures after one minute.
 
 ```jsonc
 {
@@ -113,13 +131,23 @@ Example: compact at 300k and retry failures after one minute.
 }
 ```
 
+## Migration
+
+Older versions stored one threshold per location in plugin storage. On the
+first start after upgrading, if that value exists and the project has no entry
+in `autocompact.json`, the plugin writes it as that project's override. The old
+storage key is removed either way, so clearing the project override later
+cannot resurrect the old value.
+
 ## Tool
 
 The plugin also registers an `autocompact` tool:
 
-- `action: "status"` — reports current context tokens, threshold, and whether
-  auto-compaction is armed, pending, paused, or disabled.
+- `action: "status"` — reports the effective threshold, source, current context,
+  and whether auto-compaction is armed, pending, paused, or disabled.
 - `action: "compact"` — requests compaction immediately.
+- `action: "set"` with `tokens` — sets this chat's threshold.
+- `action: "auto"` — clears this chat's override.
 
 Ask the agent "how full is this session?" or "compact this session" to use it.
 
@@ -142,7 +170,7 @@ trigger. OpenCode's own window-based compaction otherwise fires first, at a
 point that depends on the model's context window, and ignores the absolute
 threshold. Manual compaction still works with `auto` disabled.
 
-Keep `threshold` below the model's context window. With built-in compaction
+Keep thresholds below the model's context window. With built-in compaction
 disabled there is no fallback if a request grows past the window before the
 threshold is reached.
 
@@ -163,29 +191,15 @@ about free space, OpenCode can do this without a plugin:
 500k. A `buffer` at least as large as the model's window is ignored, which is
 why this plugin uses the conversation size directly.
 
-## Compared with Claude Code
-
-Claude Code treats the setting as an **auto-compact window**: how full the
-context window may get before it summarizes. With no window set, a model with a
-native 1M window compacts at about 967,000 tokens. `/autocompact 500k` lowers
-that to 500,000. The command accepts 100K to 1M, lets a bare 100-1000 mean
-thousands, caps the value at the model's real context window, saves it for the
-current model, and `/autocompact auto` returns to the model-tuned default.
-Claude Code also stops auto-compacting after a few attempts when summaries
-cannot keep up, instead of looping.
-
-This plugin uses one absolute number for every model. That is deliberate:
-OpenCode's built-in compaction is window-relative, so its firing point changes
-with the model. Set `compaction.auto` to `false` so the built-in does not
-preempt the absolute threshold.
-
 ## Development
 
 ```sh
 npm install
-npm test
-npm run typecheck
+npm run check
 ```
+
+`npm run check` runs the typecheck, the unit tests, and the GUI build. Commit
+`dist/gui-experimental.cjs`; the desktop app loads that file directly.
 
 `opencode reload` picks up changes to `src/index.ts`. Changes to modules it
 imports, such as `src/engine.ts`, need `opencode service restart` because the
