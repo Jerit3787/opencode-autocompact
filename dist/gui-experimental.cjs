@@ -1,0 +1,1 @@
+Object.defineProperties(exports,{__esModule:{value:!0},[Symbol.toStringTag]:{value:`Module`}});var e=require("@opencode/plugin/gui").Plugin.define({setup(){}});exports.default=e;
