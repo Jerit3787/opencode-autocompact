@@ -52,8 +52,9 @@ This design goes one step further: the effective value is resolved
 
 - `opencode-autocompact` is a server plugin, id `autocompact`, loaded from the
   global config at `/Users/danishhakim/Documents/Default Project/opencode-autocompact`.
-- `compaction.auto` and `compaction.background` are off; `compaction.buffer` is
-  `0`; the plugin option `threshold` is `500000`.
+- `compaction.auto` and `compaction.background` are off; `compaction.buffer`
+  stays at its default positive reserve; the plugin option `threshold` is
+  `500000`.
 - `/autocompact` currently supports `status`, `compact`, `auto`, and a token
   value. `/autocompact auto` resets to the plugin config threshold.
 - The plugin currently caps every model's `limit.context` at the threshold so
@@ -204,8 +205,10 @@ Schema:
   project override once. Remove the old storage key in every case after the
   one-time check, so it cannot resurrect an old value if the project override is
   later cleared.
-- Keep `compaction.auto: false`, `compaction.background: false`, and
-  `compaction.buffer: 0`.
+- Keep `compaction.auto: false` and `compaction.background: false`; leave
+  `compaction.buffer` at its default. A zero buffer makes the compaction
+  request measure its input at the whole window, which collapses the summary's
+  output budget to the 1,024-token floor and fails the summary.
 
 ### RPC
 

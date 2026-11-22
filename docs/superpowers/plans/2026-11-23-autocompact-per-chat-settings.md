@@ -22,7 +22,7 @@
 - The settings store, cache, and write queue are a process-global singleton keyed by file path.
 - Unit tests must never touch the real settings file; use `mkdtemp` and the `settingsPath` plugin option.
 - Do not cap `model.limit.context`; the built-in ring must show the real model window.
-- Keep `compaction.auto: false`, `compaction.background: false`, `compaction.buffer: 0`.
+- Keep `compaction.auto: false` and `compaction.background: false`; leave `compaction.buffer` at its default. A zero buffer collapses the compaction summary's output budget to the 1,024-token floor, so the buffer must stay positive.
 - Command surface: `/autocompact`, `/autocompact <tokens>`, `/autocompact auto`, `/autocompact compact`. No `on`/`off`.
 - Threshold changes re-arm only; they never compact an idle chat. `/autocompact compact` is the explicit immediate request.
 - GUI entry must be a prebuilt CommonJS file at `dist/gui-experimental.cjs`; commit it because the desktop app loads it directly.
@@ -1203,7 +1203,7 @@ Document:
 - The built-in header ring shows the real model window; the pill is the autocompact indicator.
 - `settingsPath` is a test-only option; don't set it for normal use.
 - Migration from the old per-location threshold.
-- `compaction.auto: false`, `background: false`, `buffer: 0` remain.
+- `compaction.auto: false` and `background: false` remain; `buffer` stays at its default (positive).
 
 - [ ] **Step 2: Run the full local checks**
 

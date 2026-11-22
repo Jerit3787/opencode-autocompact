@@ -12,9 +12,9 @@ when that size crosses a fixed line.
 
 - Listens for `session.step.ended` events and sums the step's usage:
   `input + output + reasoning + cache.read + cache.write`.
-- Caps `model.limit.context` at the threshold so OpenCode's existing context
-  ring, percentage, and Context panel measure against the effective ceiling.
-  The provider's real window is unchanged. Running `/autocompact off` restores it.
+- Leaves `model.limit.context` at the provider's real value, so OpenCode's
+  context ring and Context panel show the real model window. Autocompact status
+  comes from `/autocompact` and the composer pill.
 - At `threshold` tokens, requests `session.compact`. OpenCode runs it at the
   next step boundary, before the next model call.
 - Triggers once per crossing. After compaction it re-arms only when the context
@@ -36,7 +36,6 @@ auto-compaction so it cannot fire first:
   "compaction": {
     "auto": false,
     "background": false,
-    "buffer": 0,
   },
   "plugins": [
     {
@@ -53,9 +52,10 @@ For any other machine, point `package` at this directory (or publish the
 package) and reload OpenCode. No build step is needed; the plugin entry is
 TypeScript.
 
-`buffer: 0` lets the compaction summary use the full capped window. With the
-default 15% reserve, OpenCode would shorten the transcript as the context
-reaches the 500k trigger.
+Leave `compaction.buffer` at its default positive reserve. Setting it to `0`
+makes the compaction request measure its input at the whole window, which
+collapses the summary's output budget to the 1,024-token floor and fails the
+summary with "reached the output token limit".
 
 ## Command
 
