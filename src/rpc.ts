@@ -1,6 +1,11 @@
 import { Rpc } from "@opencode/plugin/rpc"
 import type { ThresholdSource } from "./settings"
 
+export type SettingsProject = {
+  directory: string
+  threshold: number
+}
+
 export type SettingsPayload = {
   global: number
   project: number | null
@@ -8,6 +13,7 @@ export type SettingsPayload = {
   effective: number
   source: ThresholdSource
   enabled: boolean
+  projects: SettingsProject[]
 }
 
 const payloadSchema = {
@@ -19,8 +25,20 @@ const payloadSchema = {
     effective: { type: "number" },
     source: { type: "string", enum: ["chat", "project", "global", "config"] },
     enabled: { type: "boolean" },
+    projects: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          directory: { type: "string" },
+          threshold: { type: "number" },
+        },
+        required: ["directory", "threshold"],
+        additionalProperties: false,
+      },
+    },
   },
-  required: ["global", "project", "session", "effective", "source", "enabled"],
+  required: ["global", "project", "session", "effective", "source", "enabled", "projects"],
   additionalProperties: false,
 } as const
 

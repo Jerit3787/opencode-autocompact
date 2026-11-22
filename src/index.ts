@@ -140,7 +140,18 @@ export default Plugin.define({
         ? await ctx.session.get({ sessionID: input.sessionID })
         : undefined
       const override = session ? readSessionOverride(session.metadata) : null
-      const resolved = await store.resolve({ directory, session: override })
+      const [resolved, data] = await Promise.all([
+        store.resolve({ directory, session: override }),
+        store.read(),
+      ])
+      const projects = Object.entries(data.projects)
+        .flatMap(([project, entry]) =>
+          typeof entry.threshold === "number"
+            ? [{ directory: project, threshold: entry.threshold }]
+            : [],
+        )
+        .sort((a, b) => a.directory.localeCompare(b.directory))
+
       return {
         global: resolved.global,
         project: resolved.project,
@@ -148,6 +159,7 @@ export default Plugin.define({
         effective: resolved.threshold,
         source: resolved.source,
         enabled: configEnabled,
+        projects,
       }
     }
 
@@ -415,7 +427,11 @@ export default Plugin.define({
       },
     })
 
-    notifyChanged = (input) => registration.events.emit("changed", input)
+    notifyChanged = (input) =>
+      registration.events.emit("changed", {
+        ...(input.directory ? { directory: input.directory } : {}),
+        ...(input.sessionID ? { sessionID: input.sessionID } : {}),
+      })
 
     await ctx.command.transform((editor) => {
       editor.add({
