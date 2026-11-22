@@ -144,30 +144,6 @@ export default Plugin.define({
       }
     }
 
-    // The desktop and TUI context indicators divide by model.limit.context. Cap that
-    // limit at the autocompact threshold so the existing UI shows the effective
-    // ceiling instead of the provider's larger window. The provider is unchanged.
-    const realWindows = new Map<string, number>()
-
-    await ctx.model.transform((editor) => {
-      for (const model of editor.list()) {
-        const key = `${model.providerID}/${model.id}`
-        const provider = editor.provider.get(model.providerID)
-        const source = provider?.models.get(model.id) ?? provider?.models.get(model.modelID)
-        const real = source?.limit.context ?? realWindows.get(key) ?? model.limit.context
-        realWindows.set(key, real)
-        model.limit.context = controller.enabled ? Math.min(real, controller.threshold) : real
-      }
-    })
-
-    const refreshModelLimits = async () => {
-      try {
-        await ctx.model.reload()
-      } catch (error) {
-        console.error("[autocompact] could not refresh model context limits:", error)
-      }
-    }
-
     const message = (event: { readonly data: { readonly sessionID: string } }) =>
       String(event.data.sessionID)
 
@@ -181,9 +157,6 @@ export default Plugin.define({
         const session = await ctx.session.get({ sessionID })
         const ref = session.model
         if (!ref) return undefined
-        const key = `${ref.providerID}/${ref.id}`
-        const real = realWindows.get(key)
-        if (real !== undefined) return real
         const models = await ctx.model.list()
         return models.data.find((model) => model.providerID === ref.providerID && model.id === ref.id)
           ?.limit.context
@@ -255,7 +228,6 @@ export default Plugin.define({
       controller.setThreshold(tokens)
       stored = { ...stored, threshold: tokens }
       await persist()
-      await refreshModelLimits()
 
       const [current, window] = await Promise.all([getContextFor(sessionID), modelWindow(sessionID)])
       const requested = controller.observe(sessionID, current, Date.now())
@@ -278,7 +250,6 @@ export default Plugin.define({
       delete stored.threshold
       await persist()
       controller.setThreshold(configThreshold)
-      await refreshModelLimits()
 
       const [current, window] = await Promise.all([getContextFor(sessionID), modelWindow(sessionID)])
       const requested = controller.observe(sessionID, current, Date.now())

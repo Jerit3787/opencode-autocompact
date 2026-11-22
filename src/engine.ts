@@ -35,6 +35,7 @@ type SessionState = {
   tokens: number
   armed: boolean
   pending: boolean
+  threshold?: number
   failedAt?: number
 }
 
@@ -160,14 +161,37 @@ export class AutoCompactController {
     return this.enabledValue
   }
 
-  /** Change the trigger size at runtime and re-arm sessions for the new line. */
+  /** Change the default trigger size and re-arm sessions without an override. */
   setThreshold(tokens: number): void {
     this.thresholdValue = Math.max(1, Math.floor(tokens))
     for (const session of this.sessions.values()) {
-      if (session.pending) continue
+      if (session.threshold !== undefined || session.pending) continue
       session.armed = true
       session.failedAt = undefined
     }
+  }
+
+  /**
+   * Set the effective threshold for one session. Re-arms only when the value
+   * actually changes, so re-resolving the same threshold on every step does not
+   * defeat the anti-loop pause after a compaction.
+   */
+  setSessionThreshold(sessionID: string, threshold: number | undefined): void {
+    const session = this.session(sessionID)
+    const next = threshold === undefined ? this.thresholdValue : Math.max(1, Math.floor(threshold))
+    if (this.thresholdFor(sessionID) === next) return
+
+    if (threshold === undefined) delete session.threshold
+    else session.threshold = Math.max(1, Math.floor(threshold))
+
+    if (session.pending) return
+    session.armed = true
+    session.failedAt = undefined
+  }
+
+  /** The threshold this session currently uses. */
+  thresholdFor(sessionID: string): number {
+    return this.sessions.get(sessionID)?.threshold ?? this.thresholdValue
   }
 
   /**
@@ -182,7 +206,7 @@ export class AutoCompactController {
 
     if (!this.enabled) return false
 
-    if (next < this.threshold) {
+    if (next < this.thresholdFor(sessionID)) {
       session.armed = true
       session.failedAt = undefined
       return false
@@ -205,7 +229,7 @@ export class AutoCompactController {
   note(sessionID: string, tokens: number): void {
     const session = this.session(sessionID)
     session.tokens = Math.max(0, Math.floor(tokens))
-    if (session.tokens < this.threshold) {
+    if (session.tokens < this.thresholdFor(sessionID)) {
       session.armed = true
       session.failedAt = undefined
     }
@@ -245,10 +269,11 @@ export class AutoCompactController {
 
   snapshot(sessionID: string): SessionSnapshot {
     const session = this.session(sessionID)
+    const threshold = this.thresholdFor(sessionID)
     return {
       tokens: session.tokens,
-      threshold: this.threshold,
-      percent: session.tokens / this.threshold,
+      threshold,
+      percent: session.tokens / threshold,
       enabled: this.enabled,
       armed: session.armed,
       pending: session.pending,

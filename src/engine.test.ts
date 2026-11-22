@@ -176,6 +176,47 @@ describe("AutoCompactController", () => {
     expect(controller.observe("ses_1", 150, 2)).toBe(true)
   })
 
+  it("uses a different threshold per session", () => {
+    const controller = new AutoCompactController({ threshold: 100 })
+    controller.setSessionThreshold("ses_a", 150)
+    controller.setSessionThreshold("ses_b", 50)
+
+    expect(controller.thresholdFor("ses_a")).toBe(150)
+    expect(controller.observe("ses_a", 150, 0)).toBe(true)
+    expect(controller.observe("ses_b", 40, 0)).toBe(false)
+  })
+
+  it("re-arms when the threshold moves", () => {
+    const controller = new AutoCompactController({ threshold: 100 })
+    expect(controller.observe("ses_1", 120, 0)).toBe(true)
+    controller.requested("ses_1")
+    controller.compactionEnded("ses_1")
+    expect(controller.observe("ses_1", 110, 1)).toBe(false)
+
+    controller.setSessionThreshold("ses_1", 80)
+    expect(controller.observe("ses_1", 120, 2)).toBe(true)
+  })
+
+  it("does not re-arm when the effective threshold is unchanged", () => {
+    const controller = new AutoCompactController({ threshold: 100 })
+    expect(controller.observe("ses_1", 120, 0)).toBe(true)
+    controller.requested("ses_1")
+    controller.compactionEnded("ses_1")
+
+    // Every step re-resolves the threshold; an unchanged value must not defeat
+    // the anti-loop pause after a compaction that left context above the line.
+    controller.setSessionThreshold("ses_1", 100)
+    expect(controller.observe("ses_1", 130, 1)).toBe(false)
+  })
+
+  it("falls back to the default after clearing an override", () => {
+    const controller = new AutoCompactController({ threshold: 100 })
+    controller.setSessionThreshold("ses_1", 50)
+    expect(controller.thresholdFor("ses_1")).toBe(50)
+    controller.setSessionThreshold("ses_1", undefined)
+    expect(controller.thresholdFor("ses_1")).toBe(100)
+  })
+
   it("reports a readable snapshot and forgets removed sessions", () => {
     const controller = new AutoCompactController({ threshold: 100 })
     controller.observe("ses_1", 50, 0)
