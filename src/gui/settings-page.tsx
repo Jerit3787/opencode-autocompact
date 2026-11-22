@@ -211,6 +211,9 @@ export function AutocompactSettingsPage() {
       const existing = await loadSettings(ctx, { directory }, true)
       if (existing.project !== null) {
         setError("That project already has an override. Edit its row instead.")
+        // The forced lookup advanced the store epoch; restart the page load
+        // it may have invalidated before returning.
+        void loadSettings(ctx, {}).catch(() => {})
         return
       }
       await saveProject(ctx, directory, undefined, fallback)
