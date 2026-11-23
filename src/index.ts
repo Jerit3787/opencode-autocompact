@@ -1,3 +1,6 @@
+import { realpath } from "node:fs/promises"
+import { homedir } from "node:os"
+import path from "node:path"
 import { Plugin } from "@opencode/plugin"
 import {
   AutoCompactController,
@@ -7,21 +10,19 @@ import {
   parseCommandTokenCount,
   parseTokenCount,
   type AutoCompactAction,
-  type SessionSnapshot,
 } from "./engine"
+import { AutocompactRpc, type SettingsPayload } from "./rpc"
+import { isValidThreshold, MIN_THRESHOLD, readSessionOverride, withSessionOverride } from "./settings"
+import { formatStatus, formatTokens } from "./status"
+import { defaultSettingsPath, getSettingsStore } from "./store"
 
 const DEFAULT_THRESHOLD = 500_000
 const DEFAULT_RETRY_AFTER_MS = 5 * 60_000
-const SETTINGS_KEY = "settings"
-const MIN_COMMAND_THRESHOLD = 100_000
+const LEGACY_SETTINGS_KEY = "settings"
 
 const USAGE =
   "Usage: /autocompact [status | compact | auto | <tokens>]. " +
   "Examples: /autocompact 500k, /autocompact 1M, /autocompact 300 (300,000 tokens)."
-
-type StoredSettings = {
-  threshold?: number
-}
 
 const toolInput = {
   type: "object",
@@ -31,7 +32,7 @@ const toolInput = {
       enum: ["status", "compact", "set", "auto"],
       description:
         "status reports current context tokens against the threshold. compact requests compaction now. " +
-        "set changes the threshold using tokens. auto restores the plugin config.",
+        "set changes this chat's threshold using tokens. auto clears this chat's threshold and falls back to the project, global, or plugin default.",
     },
     tokens: {
       type: "string",
@@ -46,59 +47,35 @@ function text(value: string) {
   return { content: [{ type: "text" as const, text: value }] }
 }
 
-function formatTokens(value: number): string {
-  return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(value)))
-}
-
 function retryAfter(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : DEFAULT_RETRY_AFTER_MS
 }
 
-function readStoredSettings(value: unknown): StoredSettings {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
-  const input = value as Record<string, unknown>
-  const stored: StoredSettings = {}
-  if (typeof input.threshold === "number" && Number.isFinite(input.threshold) && input.threshold > 0) {
-    stored.threshold = Math.floor(input.threshold)
-  }
-  return stored
-}
-
-function describe(snapshot: SessionSnapshot, configThreshold: number, stored: StoredSettings): string {
-  const source =
-    stored.threshold === undefined ? "from plugin config" : "set with /autocompact"
-  const lines = [
-    `Autocompact threshold: ${formatTokens(snapshot.threshold)} tokens (${source})`,
-    `Current context: ${formatTokens(snapshot.tokens)} tokens (${(snapshot.percent * 100).toFixed(1)}%)`,
-  ]
-
-  if (!snapshot.enabled) {
-    lines.push("Auto-compaction is disabled. Run /autocompact on to re-enable it.")
-  } else if (snapshot.pending) {
-    lines.push("A compaction request is pending. It runs at the next step boundary.")
-  } else if (snapshot.tokens >= snapshot.threshold) {
-    lines.push(
-      snapshot.failedAt === undefined
-        ? "Auto-compaction is paused until context drops below the threshold."
-        : "The last compaction failed. The plugin will retry after its backoff.",
-    )
-  } else {
-    lines.push("Auto-compaction is armed.")
-  }
-
-  if (stored.threshold !== undefined) {
-    lines.push(
-      `Plugin config: ${formatTokens(configThreshold)} tokens. Run /autocompact auto to restore it.`,
-    )
-  }
-
-  return lines.join("\n")
-}
-
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** Expand `~`, require an absolute path, and resolve symlinks when it exists. */
+async function canonicalDirectory(value: string): Promise<string | undefined> {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+
+  const expanded =
+    trimmed === "~"
+      ? homedir()
+      : trimmed.startsWith("~/")
+        ? path.join(homedir(), trimmed.slice(2))
+        : trimmed
+  if (!path.isAbsolute(expanded)) return undefined
+
+  const resolved = path.resolve(expanded)
+  try {
+    return await realpath(resolved)
+  } catch {
+    return resolved
+  }
 }
 
 function normalizeAction(value: string | undefined): AutoCompactAction | undefined {
@@ -116,57 +93,46 @@ function normalizeAction(value: string | undefined): AutoCompactAction | undefin
 export default Plugin.define({
   id: "autocompact",
   async setup(ctx) {
-    const configThreshold = parseTokenCount(ctx.options.threshold, DEFAULT_THRESHOLD)
+    const configThreshold = Math.max(
+      MIN_THRESHOLD,
+      parseTokenCount(ctx.options.threshold, DEFAULT_THRESHOLD),
+    )
     const configEnabled = ctx.options.enabled !== false
+    const settingsPath =
+      typeof ctx.options.settingsPath === "string" && ctx.options.settingsPath.length > 0
+        ? ctx.options.settingsPath
+        : defaultSettingsPath()
+    const store = getSettingsStore({ path: settingsPath, configThreshold })
+    const canonical = String(ctx.location.project.canonical)
 
-    let stored: StoredSettings = {}
     try {
-      stored = readStoredSettings(await ctx.storage.get(SETTINGS_KEY))
+      const state = await store.readState()
+      if (state.degraded) {
+        console.warn(
+          "[autocompact] settings file is unreadable; skipping migration and keeping the legacy key:",
+          state.reason,
+        )
+      } else {
+        const legacy = await ctx.storage.get(LEGACY_SETTINGS_KEY)
+        if (legacy && typeof legacy === "object" && !Array.isArray(legacy)) {
+          const raw = (legacy as Record<string, unknown>).threshold
+          if (raw !== undefined && !isValidThreshold(raw)) {
+            console.warn("[autocompact] ignoring invalid legacy threshold:", raw)
+          } else if (isValidThreshold(raw) && (await store.getProject(canonical)) === null) {
+            await store.setProject(canonical, raw)
+          }
+        }
+        await ctx.storage.remove(LEGACY_SETTINGS_KEY)
+      }
     } catch (error) {
-      console.error("[autocompact] could not read saved settings:", error)
+      console.warn("[autocompact] could not migrate saved settings:", error)
     }
 
     const controller = new AutoCompactController({
-      threshold: stored.threshold ?? configThreshold,
+      threshold: configThreshold,
       enabled: configEnabled,
       retryAfterMs: retryAfter(ctx.options.retryAfterMs),
     })
-
-    const persist = async () => {
-      try {
-        if (stored.threshold === undefined) {
-          await ctx.storage.remove(SETTINGS_KEY)
-        } else {
-          await ctx.storage.set(SETTINGS_KEY, { ...stored })
-        }
-      } catch (error) {
-        console.error("[autocompact] could not save settings:", error)
-      }
-    }
-
-    // The desktop and TUI context indicators divide by model.limit.context. Cap that
-    // limit at the autocompact threshold so the existing UI shows the effective
-    // ceiling instead of the provider's larger window. The provider is unchanged.
-    const realWindows = new Map<string, number>()
-
-    await ctx.model.transform((editor) => {
-      for (const model of editor.list()) {
-        const key = `${model.providerID}/${model.id}`
-        const provider = editor.provider.get(model.providerID)
-        const source = provider?.models.get(model.id) ?? provider?.models.get(model.modelID)
-        const real = source?.limit.context ?? realWindows.get(key) ?? model.limit.context
-        realWindows.set(key, real)
-        model.limit.context = controller.enabled ? Math.min(real, controller.threshold) : real
-      }
-    })
-
-    const refreshModelLimits = async () => {
-      try {
-        await ctx.model.reload()
-      } catch (error) {
-        console.error("[autocompact] could not refresh model context limits:", error)
-      }
-    }
 
     const message = (event: { readonly data: { readonly sessionID: string } }) =>
       String(event.data.sessionID)
@@ -181,9 +147,6 @@ export default Plugin.define({
         const session = await ctx.session.get({ sessionID })
         const ref = session.model
         if (!ref) return undefined
-        const key = `${ref.providerID}/${ref.id}`
-        const real = realWindows.get(key)
-        if (real !== undefined) return real
         const models = await ctx.model.list()
         return models.data.find((model) => model.providerID === ref.providerID && model.id === ref.id)
           ?.limit.context
@@ -192,13 +155,62 @@ export default Plugin.define({
       }
     }
 
-    const thresholdWarning = (threshold: number, window: number | undefined): string | undefined => {
-      if (window === undefined || threshold < window) return undefined
-      return (
-        `Warning: this model's context window is ${formatTokens(window)} tokens, ` +
-        `so a ${formatTokens(threshold)}-token threshold will never be reached. ` +
-        `Lower the threshold or switch to a model with a larger window.`
-      )
+    const applySessionThreshold = async (sessionID: string, directory = canonical) => {
+      const session = await ctx.session.get({ sessionID })
+      const override = readSessionOverride(session.metadata)
+      const resolved = await store.resolve({ directory, session: override })
+      controller.setSessionThreshold(sessionID, resolved.threshold)
+      return resolved
+    }
+
+    const payloadFor = async (input: {
+      directory?: string
+      sessionID?: string
+    }): Promise<SettingsPayload> => {
+      const requested = input.directory?.trim()
+      const directory = requested ? await canonicalDirectory(requested) : undefined
+      const session = input.sessionID
+        ? await ctx.session.get({ sessionID: input.sessionID })
+        : undefined
+      const override = directory && session ? readSessionOverride(session.metadata) : null
+      const [resolved, state] = await Promise.all([
+        store.resolve({ directory, session: override }),
+        store.readState(),
+      ])
+      const projects = Object.entries(state.data.projects)
+        .flatMap(([project, entry]) =>
+          typeof entry.threshold === "number"
+            ? [{ directory: project, threshold: entry.threshold }]
+            : [],
+        )
+        .sort((a, b) => a.directory.localeCompare(b.directory))
+
+      return {
+        global: resolved.global,
+        project: resolved.project,
+        session: resolved.session,
+        effective: resolved.threshold,
+        source: resolved.source,
+        enabled: configEnabled,
+        projects,
+        settingsPath,
+        degraded: state.degraded,
+        ...(state.backupPath ? { backupPath: state.backupPath } : {}),
+      }
+    }
+
+    let notifyChanged: (input: {
+      directory?: string
+      sessionID?: string
+    }) => Promise<void> = async () => {}
+
+    const refreshSession = async (sessionID: string | undefined, directory?: string) => {
+      if (!sessionID) return
+      try {
+        await applySessionThreshold(sessionID, directory)
+      } catch (error) {
+        console.warn(`[autocompact] could not refresh the threshold for ${sessionID}:`, error)
+      }
     }
 
     const requestCompaction = async (sessionID: string, observed: number): Promise<boolean> => {
@@ -206,7 +218,7 @@ export default Plugin.define({
       try {
         await ctx.session.compact({ sessionID })
         console.log(
-          `[autocompact] requested compaction for ${sessionID} at ${formatTokens(observed)} tokens (threshold ${formatTokens(controller.threshold)})`,
+          `[autocompact] requested compaction for ${sessionID} at ${formatTokens(observed)} tokens (threshold ${formatTokens(controller.thresholdFor(sessionID))})`,
         )
         return true
       } catch (error) {
@@ -216,29 +228,29 @@ export default Plugin.define({
       }
     }
 
-    const observeContext = async (sessionID: string): Promise<{ tokens: number; requested: boolean }> => {
-      const tokens = await readContext(sessionID)
-      controller.note(sessionID, tokens)
-      const requested = controller.observe(sessionID, tokens, Date.now())
-        ? await requestCompaction(sessionID, tokens)
-        : false
-      return { tokens, requested }
-    }
+    const statusFor = async (sessionID: string, directory = canonical): Promise<string> => {
+      const [resolved, tokens, window] = await Promise.all([
+        applySessionThreshold(sessionID, directory),
+        readContext(sessionID),
+        modelWindow(sessionID),
+      ])
 
-    const statusFor = async (sessionID: string): Promise<string> => {
-      const [tokens, window] = await Promise.all([readContext(sessionID), modelWindow(sessionID)])
       controller.note(sessionID, tokens)
       const snapshot = controller.snapshot(sessionID)
-      const lines = [describe(snapshot, configThreshold, stored)]
-      if (window !== undefined) {
-        lines.push(`Model context window: ${formatTokens(window)} tokens.`)
-        if (snapshot.enabled && snapshot.threshold < window) {
-          lines.push(`UI context limit: ${formatTokens(snapshot.threshold)} tokens (autocompact threshold).`)
-        }
-      }
-      const warning = thresholdWarning(snapshot.threshold, window)
-      if (warning) lines.push(warning)
-      return lines.join("\n")
+      return formatStatus({
+        threshold: resolved.threshold,
+        source: resolved.source,
+        tokens,
+        modelWindow: window,
+        enabled: snapshot.enabled,
+        pending: snapshot.pending,
+        armed: snapshot.armed,
+        failedAt: snapshot.failedAt,
+        configThreshold,
+        global: resolved.global,
+        project: resolved.project,
+        session: resolved.session,
+      })
     }
 
     const getContextFor = async (sessionID: string): Promise<number> => {
@@ -247,54 +259,42 @@ export default Plugin.define({
       return tokens
     }
 
-    const setThresholdFor = async (sessionID: string, tokens: number): Promise<string> => {
-      if (tokens < MIN_COMMAND_THRESHOLD) {
-        return `Threshold must be at least ${formatTokens(MIN_COMMAND_THRESHOLD)} tokens. ${USAGE}`
+    const setThresholdFor = async (
+      sessionID: string,
+      tokens: number,
+      directory = canonical,
+    ): Promise<string> => {
+      if (tokens < MIN_THRESHOLD) {
+        return `Threshold must be at least ${formatTokens(MIN_THRESHOLD)} tokens. ${USAGE}`
       }
 
-      controller.setThreshold(tokens)
-      stored = { ...stored, threshold: tokens }
-      await persist()
-      await refreshModelLimits()
-
-      const [current, window] = await Promise.all([getContextFor(sessionID), modelWindow(sessionID)])
-      const requested = controller.observe(sessionID, current, Date.now())
-        ? await requestCompaction(sessionID, current)
-        : false
-
-      const lines = [
-        `Autocompact threshold set to ${formatTokens(tokens)} tokens.`,
-        `Current context: ${formatTokens(current)} tokens (${((current / tokens) * 100).toFixed(1)}%).`,
-        requested
-          ? "Compaction requested; it runs at the next step boundary."
-          : "Auto-compaction is armed.",
-      ]
-      const warning = thresholdWarning(tokens, window)
-      if (warning) lines.push(warning)
-      return lines.join("\n")
+      const session = await ctx.session.get({ sessionID })
+      await ctx.session.update({
+        sessionID,
+        metadata: withSessionOverride(session.metadata, tokens) as Parameters<typeof ctx.session.update>[0]["metadata"],
+      })
+      await refreshSession(sessionID, directory)
+      await notifyChanged({ directory, sessionID })
+      try {
+        return await statusFor(sessionID, directory)
+      } catch (error) {
+        return `Chat threshold set to ${formatTokens(tokens)} tokens. The status could not be read: ${errorText(error)}`
+      }
     }
 
-    const resetThresholdFor = async (sessionID: string): Promise<string> => {
-      delete stored.threshold
-      await persist()
-      controller.setThreshold(configThreshold)
-      await refreshModelLimits()
-
-      const [current, window] = await Promise.all([getContextFor(sessionID), modelWindow(sessionID)])
-      const requested = controller.observe(sessionID, current, Date.now())
-        ? await requestCompaction(sessionID, current)
-        : false
-
-      const lines = [
-        `Autocompact threshold reset to plugin config: ${formatTokens(configThreshold)} tokens.`,
-        `Current context: ${formatTokens(current)} tokens (${((current / configThreshold) * 100).toFixed(1)}%).`,
-        requested
-          ? "Compaction requested; it runs at the next step boundary."
-          : "Auto-compaction is armed.",
-      ]
-      const warning = thresholdWarning(configThreshold, window)
-      if (warning) lines.push(warning)
-      return lines.join("\n")
+    const resetThresholdFor = async (sessionID: string, directory = canonical): Promise<string> => {
+      const session = await ctx.session.get({ sessionID })
+      await ctx.session.update({
+        sessionID,
+        metadata: withSessionOverride(session.metadata, null) as Parameters<typeof ctx.session.update>[0]["metadata"],
+      })
+      await refreshSession(sessionID, directory)
+      await notifyChanged({ directory, sessionID })
+      try {
+        return await statusFor(sessionID, directory)
+      } catch (error) {
+        return `Chat threshold cleared. The status could not be read: ${errorText(error)}`
+      }
     }
 
     const compactNow = async (sessionID: string): Promise<string> => {
@@ -309,14 +309,15 @@ export default Plugin.define({
       action: AutoCompactAction,
       argument: string | number | undefined,
       sessionID: string,
+      directory = canonical,
     ): Promise<string> => {
       switch (action) {
         case "status":
-          return statusFor(sessionID)
+          return statusFor(sessionID, directory)
         case "compact":
           return compactNow(sessionID)
         case "auto":
-          return resetThresholdFor(sessionID)
+          return resetThresholdFor(sessionID, directory)
         case "set": {
           const tokens =
             typeof argument === "number"
@@ -325,7 +326,7 @@ export default Plugin.define({
           if (tokens === undefined) {
             return `Could not read a token count from "${String(argument ?? "")}". ${USAGE}`
           }
-          return setThresholdFor(sessionID, tokens)
+          return setThresholdFor(sessionID, tokens, directory)
         }
       }
     }
@@ -337,6 +338,7 @@ export default Plugin.define({
           signal: abort.signal,
           types: [
             "session.step.ended",
+            "session.metadata.updated",
             "session.compaction.started",
             "session.compaction.ended",
             "session.compaction.failed",
@@ -346,9 +348,23 @@ export default Plugin.define({
           switch (event.type) {
             case "session.step.ended": {
               const sessionID = message(event)
+              try {
+                await applySessionThreshold(sessionID)
+              } catch (error) {
+                console.error(`[autocompact] could not resolve the threshold for ${sessionID}:`, error)
+              }
               const tokens = contextTokens(event.data.tokens)
               if (controller.observe(sessionID, tokens, Date.now())) {
                 await requestCompaction(sessionID, tokens)
+              }
+              break
+            }
+            case "session.metadata.updated": {
+              const sessionID = message(event)
+              try {
+                await applySessionThreshold(sessionID)
+              } catch (error) {
+                console.error(`[autocompact] could not resolve the threshold for ${sessionID}:`, error)
               }
               break
             }
@@ -383,10 +399,169 @@ export default Plugin.define({
       }
     })()
 
+    const registration = await ctx.rpc.register(AutocompactRpc, {
+      get: async (input, context) => {
+        const value = input as { directory?: string; sessionID?: string }
+        try {
+          return await payloadFor(value)
+        } catch (error) {
+          if (!value.sessionID) throw error
+          return context.error("not_found", `Session not found: ${value.sessionID}`, {
+            sessionID: value.sessionID,
+          })
+        }
+      },
+      setGlobal: async (input, context) => {
+        const value = input as { directory?: string; sessionID?: string; threshold: number }
+        if (!isValidThreshold(value.threshold)) {
+          return context.error(
+            "invalid_threshold",
+            `Threshold must be at least ${formatTokens(MIN_THRESHOLD)} tokens`,
+            { minimum: MIN_THRESHOLD },
+          )
+        }
+
+        const directory = value.directory
+          ? await canonicalDirectory(value.directory)
+          : canonical
+        if (!directory) {
+          return context.error(
+            "invalid_directory",
+            "Project directory must be an absolute path.",
+            { message: "Project directory must be an absolute path." },
+          )
+        }
+        try {
+          await store.setGlobal(value.threshold)
+        } catch (error) {
+          return context.error("write_failed", errorText(error), { message: errorText(error) })
+        }
+
+        await refreshSession(value.sessionID, directory)
+        await notifyChanged({ directory, sessionID: value.sessionID })
+        try {
+          return await payloadFor({ directory: value.directory, sessionID: value.sessionID })
+        } catch (error) {
+          if (value.sessionID) {
+            return context.error("not_found", `Session not found: ${value.sessionID}`, {
+              sessionID: value.sessionID,
+            })
+          }
+          throw error
+        }
+      },
+      setProject: async (input, context) => {
+        const value = input as {
+          directory: string
+          sessionID?: string
+          threshold: number | null
+        }
+        if (value.threshold !== null && !isValidThreshold(value.threshold)) {
+          return context.error(
+            "invalid_threshold",
+            `Threshold must be at least ${formatTokens(MIN_THRESHOLD)} tokens`,
+            { minimum: MIN_THRESHOLD },
+          )
+        }
+
+        const directory = await canonicalDirectory(value.directory)
+        if (!directory) {
+          return context.error(
+            "invalid_directory",
+            "Project directory must be an absolute path.",
+            { message: "Project directory must be an absolute path." },
+          )
+        }
+
+        try {
+          await store.setProject(directory, value.threshold)
+        } catch (error) {
+          return context.error("write_failed", errorText(error), { message: errorText(error) })
+        }
+
+        await refreshSession(value.sessionID, directory)
+        await notifyChanged({ directory, sessionID: value.sessionID })
+        try {
+          return await payloadFor({ directory, sessionID: value.sessionID })
+        } catch (error) {
+          if (value.sessionID) {
+            return context.error("not_found", `Session not found: ${value.sessionID}`, {
+              sessionID: value.sessionID,
+            })
+          }
+          throw error
+        }
+      },
+      setSession: async (input, context) => {
+        const value = input as {
+          directory: string
+          sessionID: string
+          threshold: number | null
+        }
+        if (value.threshold !== null && !isValidThreshold(value.threshold)) {
+          return context.error(
+            "invalid_threshold",
+            `Threshold must be at least ${formatTokens(MIN_THRESHOLD)} tokens`,
+            { minimum: MIN_THRESHOLD },
+          )
+        }
+
+        const directory = await canonicalDirectory(value.directory)
+        if (!directory) {
+          return context.error(
+            "invalid_directory",
+            "Project directory must be an absolute path.",
+            { message: "Project directory must be an absolute path." },
+          )
+        }
+
+        let session
+        try {
+          session = await ctx.session.get({ sessionID: value.sessionID })
+        } catch {
+          return context.error("not_found", `Session not found: ${value.sessionID}`, {
+            sessionID: value.sessionID,
+          })
+        }
+
+        try {
+          await ctx.session.update({
+            sessionID: value.sessionID,
+            metadata: withSessionOverride(session.metadata, value.threshold) as Parameters<
+              typeof ctx.session.update
+            >[0]["metadata"],
+          })
+        } catch (error) {
+          return context.error("write_failed", errorText(error), { message: errorText(error) })
+        }
+
+        await refreshSession(value.sessionID, directory)
+        await notifyChanged({ directory, sessionID: value.sessionID })
+        try {
+          return await payloadFor({ directory, sessionID: value.sessionID })
+        } catch (error) {
+          return context.error("not_found", `Session not found: ${value.sessionID}`, {
+            sessionID: value.sessionID,
+          })
+        }
+      },
+    })
+
+    notifyChanged = async (input) => {
+      try {
+        await registration.events.emit("changed", {
+          ...(input.directory ? { directory: input.directory } : {}),
+          ...(input.sessionID ? { sessionID: input.sessionID } : {}),
+        })
+      } catch (error) {
+        console.warn("[autocompact] could not emit the settings change event:", error)
+      }
+    }
+
     await ctx.command.transform((editor) => {
       editor.add({
         name: "autocompact",
-        description: "Show or set when OpenCode compacts automatically (default 500k tokens)",
+        description: "Show or set this chat's autocompact threshold",
         execute: async ({ sessionID, prompt, delivery }) => {
           const command = parseAutocompactCommand(prompt.text)
           const action = normalizeAction(command.action)
@@ -415,8 +590,8 @@ export default Plugin.define({
         name: "autocompact",
         description:
           "Inspect or control automatic context compaction for this session. The plugin compacts automatically when the context reaches its threshold. " +
-          "Use action=status to see the current context size against the threshold, action=compact to request compaction now, action=set with tokens to change the threshold, " +
-          "action=auto to restore the plugin config.",
+          "Use action=status to see the current context size against the threshold, action=compact to request compaction now, action=set with tokens to change this chat's threshold, " +
+          "action=auto to clear this chat's override and fall back to the project, global, or plugin default.",
         input: toolInput,
         options: { codemode: false },
         execute: async (raw, context) => {

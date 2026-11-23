@@ -1,0 +1,79 @@
+import { ComposerPill, Plugin, SettingsPage } from "@opencode/plugin/gui"
+import { readSessionOverride } from "./settings"
+import { autocompactPillView } from "./gui/pill"
+import { AutocompactSettingsPage } from "./gui/settings-page"
+import {
+  clearSession,
+  ensureSettings,
+  settingsKey,
+  settingsState,
+  subscribeSettings,
+} from "./gui/state"
+
+export default Plugin.define({
+  i18n: {
+    en: {
+      "page.title": "Autocompact",
+      "page.description": "Choose when OpenCode summarizes context.",
+    },
+  },
+  setup(ctx) {
+    const unsubscribe = subscribeSettings(ctx)
+
+    ctx.add(SettingsPage, {
+      id: "autocompact",
+      get title() {
+        return ctx.t("page.title")
+      },
+      icon: "status",
+      render: () => <AutocompactSettingsPage />,
+    })
+
+    ctx.add(ComposerPill, {
+      id: "autocompact",
+      order: 0,
+      show: (input) => {
+        // The server keys project overrides by canonical project root, not by
+        // a session's workspace subdirectory or worktree checkout.
+        const directory =
+          input.session.project?.worktree ??
+          input.session.listedProject?.worktree ??
+          input.session.directory
+        const key = settingsKey(directory, input.session.id)
+        const payload = settingsState[key]
+
+        if (!payload) {
+          void ensureSettings(ctx, { directory, sessionID: input.session.id }).catch(() => {})
+          return undefined
+        }
+
+        let override: number | null = null
+        try {
+          const info = input.session.server.data.session.get(input.session.id)
+          override = readSessionOverride(info?.metadata)
+        } catch {
+          return undefined
+        }
+
+        // The command can change the override without going through the RPC.
+        // Refresh before rendering so an old effective value is never shown.
+        if (payload.session !== override) {
+          void ensureSettings(ctx, { directory, sessionID: input.session.id }, 0).catch(() => {})
+          return undefined
+        }
+
+        void ensureSettings(ctx, { directory, sessionID: input.session.id }).catch(() => {})
+
+        return autocompactPillView({
+          session: input.session,
+          payload,
+          override,
+          onReset: () =>
+            void clearSession(ctx, directory, input.session.id).catch(() => {}),
+        })
+      },
+    })
+
+    return () => unsubscribe()
+  },
+})

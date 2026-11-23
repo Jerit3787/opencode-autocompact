@@ -22,7 +22,7 @@
 - The settings store, cache, and write queue are a process-global singleton keyed by file path.
 - Unit tests must never touch the real settings file; use `mkdtemp` and the `settingsPath` plugin option.
 - Do not cap `model.limit.context`; the built-in ring must show the real model window.
-- Keep `compaction.auto: false`, `compaction.background: false`, `compaction.buffer: 0`.
+- Keep `compaction.auto: false` and `compaction.background: false`; leave `compaction.buffer` at its default. A zero buffer collapses the compaction summary's output budget to the 1,024-token floor, so the buffer must stay positive.
 - Command surface: `/autocompact`, `/autocompact <tokens>`, `/autocompact auto`, `/autocompact compact`. No `on`/`off`.
 - Threshold changes re-arm only; they never compact an idle chat. `/autocompact compact` is the explicit immediate request.
 - GUI entry must be a prebuilt CommonJS file at `dist/gui-experimental.cjs`; commit it because the desktop app loads it directly.
@@ -38,7 +38,7 @@
 - **Session metadata with unrelated keys** must be preserved when setting/clearing the chat override. Test in Task 1.
 - **A threshold lowered below a disarmed session's context** must re-arm it and trigger on the next observation, not loop. Test in Task 3.
 - **A settings file changed by another process** must be picked up by mtime, not a stale cache. Test in Task 2.
-- **An RPC call arriving at the wrong project-location plugin instance** must use the directory in the request, not `ctx.location`. Test the directory resolver in Task 6 and verify with two projects in Task 10.
+- **An RPC call arriving at the wrong project-location plugin instance** must use the directory in the request, not `ctx.location`. The directory resolver lives in the server handler; verify with two sessions plus a temporary global/project override in Task 10.
 
 ---
 
@@ -765,6 +765,10 @@ git commit -m "feat: resolve autocompact thresholds per chat, project, and globa
 - Consumes: `SettingsStore`, `isValidThreshold`, `readSessionOverride`, `withSessionOverride`, `ThresholdSource`.
 - Produces:
   ```ts
+  export type SettingsProject = {
+    directory: string
+    threshold: number
+  }
   export type SettingsPayload = {
     global: number
     project: number | null
@@ -772,6 +776,7 @@ git commit -m "feat: resolve autocompact thresholds per chat, project, and globa
     effective: number
     source: ThresholdSource
     enabled: boolean
+    projects: SettingsProject[]
   }
   export const AutocompactRpc = Rpc.define({ ... })
   export function requestDirectory(input: { directory?: string }, fallback: string): string
@@ -786,10 +791,13 @@ Create `src/rpc.ts` with `Rpc.define` id `autocompact`. Use JSON Schema:
 - `setGlobal`: input `{ directory?: string, sessionID?: string, threshold: number }`.
 - `setProject`: input `{ directory: string, sessionID?: string, threshold: number | null }`.
 - `setSession`: input `{ directory: string, sessionID: string, threshold: number | null }`.
-- Each method outputs `SettingsPayload`: `global` number, `project` number|null, `session` number|null, `effective` number, `source` enum, `enabled` boolean.
+- Each method outputs `SettingsPayload`: `global` number, `project` number|null, `session` number|null, `effective` number, `source` enum, `enabled` boolean, and `projects` as an array of `{ directory, threshold }` for every project override.
 - Errors: `invalid_threshold` with `{ minimum: number }`, `write_failed` with `{ message: string }`.
 - Event `changed` with `{ directory?: string, sessionID?: string }`.
-- Export `requestDirectory(input, fallback)`: trimmed `input.directory` or fallback.
+- Implementation note: directory resolution moved to `canonicalDirectory` in
+  `src/index.ts` (expand `~`, require absolute, `realpath` when present). The
+  earlier `requestDirectory` helper was removed because it resolved only the
+  receiving instance's fallback.
 
 - [ ] **Step 2: Add a failing test for the directory resolver**
 
@@ -999,18 +1007,15 @@ git commit -m "build: add desktop GUI plugin bundle"
 
 Export `AutocompactSettingsPage`. Use `usePlugin()` and `ctx.ui`.
 
-- Read the routed session: `ctx.sessions.current()`.
-- `directory = session?.project?.canonical ?? session?.directory`. If the
-  installed `Project` type has no `canonical`, use `session.directory` for v1
-  and document the worktree limitation.
-- `sessionID = session?.id`.
-- Load `loadSettings` on mount and whenever the routed session key changes; use `createEffect` with a keyed accessor.
-- Render `ui.SettingsLayout` title "Autocompact" with three sections:
+- The page does not depend on a routed session. The Settings screen unmounts
+  the routed session, so `ctx.sessions.current()` is undefined there.
+- Load `loadSettings(ctx, {})`; when a `changed` event clears the store, refetch
+  instead of leaving the page empty.
+- Render `ui.SettingsLayout` title "Autocompact" with two sections:
   - **Global default**: a `ui.TextInput` with value (compact string such as `500k`) and a `ui.Button` Save. Parse with `parseCommandTokenCount`; reject values below `MIN_THRESHOLD`; call `saveGlobal`.
-  - **This project**: a `ui.TextInput` + Save plus a **Use global** button; call `saveProject(directory, ..., value | null)`. Disable when no session, with a note.
-  - **This chat**: show effective threshold, source, and a **Reset chat override** button calling `clearSession(directory, sessionID)`. Disable when no session.
-- Show a footer error on invalid input or RPC failure.
-- Use getters/reactive reads for session data; do not read `ctx.sessions.current()` once in setup.
+  - **Projects**: a row for every `projects` entry from the payload, sorted by directory. Each row has a `ui.TextInput`, Save, and **Use global** calling `saveProject(directory, ..., value | null)`. End the section with an **Add project** row (directory input + Add) seeded with the current global value.
+- No chat section: chat thresholds are set with `/autocompact`; the pill shows and resets the chat override.
+- Show an error above the sections on invalid input or RPC failure.
 
 - [ ] **Step 3: Wire the page in `src/gui.tsx`**
 
@@ -1054,7 +1059,7 @@ Expected: PASS.
 - [ ] **Step 5: Reload and check the page**
 
 Run: `"$OC" reload`
-Open **Settings → Autocompact**. Expected: global/project/chat sections render; global works without a session; project/chat show a note when no session is routed.
+Open **Settings → Autocompact**. Expected: the global default and one row per project override render; each row saves and can be cleared to the global value; **Add project** adds a row; no chat section is present. Live check: a `setProject` RPC for `/private/tmp` to 650,000 refreshed the open page to 650k, then 600,000 restored it.
 
 - [ ] **Step 6: Commit**
 
@@ -1124,7 +1129,10 @@ ctx.add(ComposerPill, {
   id: "autocompact",
   order: 0,
   show: (input) => {
-    const directory = input.session.project?.canonical ?? input.session.directory
+    const directory =
+      input.session.project?.worktree ??
+      input.session.listedProject?.worktree ??
+      input.session.directory
     const key = settingsKey(directory, input.session.id)
     const payload = settingsState[key]
 
@@ -1198,12 +1206,12 @@ Document:
 
 - Precedence: chat → project → global → plugin config.
 - `/autocompact`, `/autocompact <tokens>`, `/autocompact auto`, `/autocompact compact`.
-- Settings → Autocompact: global default, project override, chat status/reset.
+- Settings → Autocompact: global default and one row per project override; no chat section (chat thresholds use `/autocompact`).
 - Per-chat composer pill.
 - The built-in header ring shows the real model window; the pill is the autocompact indicator.
 - `settingsPath` is a test-only option; don't set it for normal use.
 - Migration from the old per-location threshold.
-- `compaction.auto: false`, `background: false`, `buffer: 0` remain.
+- `compaction.auto: false` and `background: false` remain; `buffer` stays at its default (positive).
 
 - [ ] **Step 2: Run the full local checks**
 
@@ -1262,5 +1270,5 @@ git commit -m "docs: describe per-chat autocompact settings"
   - Metadata merge: Task 1 test.
   - Lowered threshold re-arm: Task 3 test.
   - Cross-process mtime: Task 2 test.
-  - Wrong-project RPC: Task 6 `requestDirectory` test; Task 10 two-project live check.
+  - Wrong-project RPC: Task 6 `requestDirectory` test; Task 10 used two sessions in one project plus a temporary global/project RPC check. A two-project live check remains optional.
 - Tasks 5, 6, and 7-9 are integration/GUI work with typecheck, build, reload, and manual acceptance rather than unit tests; the pure logic they depend on is covered by Tasks 1-4 and 6.
