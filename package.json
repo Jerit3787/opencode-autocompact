@@ -1,7 +1,6 @@
 {
   "name": "opencode-autocompact",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Automatic context compaction for OpenCode at an absolute token threshold.",
   "author": "Danish Hakim",
@@ -19,7 +18,16 @@
     "./gui-experimental": "./dist/gui-experimental.cjs"
   },
   "files": [
-    "src",
+    "src/index.ts",
+    "src/engine.ts",
+    "src/settings.ts",
+    "src/store.ts",
+    "src/status.ts",
+    "src/rpc.ts",
+    "src/gui.tsx",
+    "src/gui/state.ts",
+    "src/gui/settings-page.tsx",
+    "src/gui/pill.tsx",
     "dist",
     "README.md"
   ],
@@ -27,7 +35,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build:gui": "vite build",
-    "check": "npm run typecheck && npm test && npm run build:gui"
+    "check": "npm run typecheck && npm test && npm run build:gui",
+    "prepublishOnly": "npm run check"
   },
   "dependencies": {
     "@opencode/plugin": "2.3.2"
@@ -43,5 +52,12 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Jerit3787/opencode-autocompact.git"
+  },
+  "homepage": "https://github.com/Jerit3787/opencode-autocompact#readme",
+  "bugs": {
+    "url": "https://github.com/Jerit3787/opencode-autocompact/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

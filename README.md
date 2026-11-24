@@ -35,14 +35,8 @@ Subagent sessions are handled the same way as top-level sessions.
 
 ## Install
 
-```sh
-git clone https://github.com/Jerit3787/opencode-autocompact.git
-cd opencode-autocompact
-npm install
-```
-
-Add the absolute plugin directory to `~/.config/opencode/opencode.jsonc` and
-turn off OpenCode's own window-based auto-compaction so it cannot fire first:
+Add the GitHub package directly to `~/.config/opencode/opencode.jsonc`. No clone
+and no absolute path:
 
 ```jsonc title="~/.config/opencode/opencode.jsonc"
 {
@@ -52,7 +46,7 @@ turn off OpenCode's own window-based auto-compaction so it cannot fire first:
   },
   "plugins": [
     {
-      "package": "/absolute/path/to/opencode-autocompact",
+      "package": "github:Jerit3787/opencode-autocompact",
       "options": {
         "threshold": 500000,
       },
@@ -61,11 +55,33 @@ turn off OpenCode's own window-based auto-compaction so it cannot fire first:
 }
 ```
 
-Reload OpenCode after saving the config. The server entry is TypeScript; the
-desktop GUI entry is the committed `dist/gui-experimental.cjs`, so no build step
-is needed for normal use. Run `npm run build:gui` after changing the GUI source.
+To use the defaults, the shorthand works too:
+
+```jsonc
+{
+  "plugins": ["github:Jerit3787/opencode-autocompact"]
+}
+```
+
+OpenCode installs the package and its dependencies on reload. To pin a revision,
+append `#<commit-sha>` to the spec. The server entry is TypeScript; the desktop
+GUI entry is the committed `dist/gui-experimental.cjs`, so there is no build
+step for normal use.
+
 Requires OpenCode Desktop 2.3.2 or a compatible newer version; the GUI plugin
 API is experimental.
+
+### Local development
+
+```sh
+git clone https://github.com/Jerit3787/opencode-autocompact.git
+cd opencode-autocompact
+npm install
+npm run check
+```
+
+Then point `package` at the checkout's absolute path while developing. Run
+`npm run build:gui` after changing the GUI source.
 
 Leave `compaction.buffer` at its default positive reserve. Setting it to `0`
 makes the compaction request measure its input at the whole window, which
