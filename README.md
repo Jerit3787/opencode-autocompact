@@ -35,8 +35,29 @@ Subagent sessions are handled the same way as top-level sessions.
 
 ## Install
 
-Add the GitHub package directly to `~/.config/opencode/opencode.jsonc`. No clone
-and no absolute path:
+One command installs the plugin and adds it to the global config:
+
+```sh
+opencode plugin add github:Jerit3787/opencode-autocompact
+```
+
+That uses OpenCode's plugin installer, so there is no clone and no absolute
+path. To pin a revision, append `#<commit-sha>` to the spec.
+
+Then make sure OpenCode's own window-based auto-compaction is off so it cannot
+fire first:
+
+```jsonc title="~/.config/opencode/opencode.jsonc"
+{
+  "compaction": {
+    "auto": false,
+    "background": false,
+  },
+}
+```
+
+Or add it by hand. The default threshold is 500,000 tokens; the object form
+lets you set a different fallback:
 
 ```jsonc title="~/.config/opencode/opencode.jsonc"
 {
@@ -55,7 +76,7 @@ and no absolute path:
 }
 ```
 
-To use the defaults, the shorthand works too:
+The shorthand uses the defaults:
 
 ```jsonc
 {
@@ -63,10 +84,9 @@ To use the defaults, the shorthand works too:
 }
 ```
 
-OpenCode installs the package and its dependencies on reload. To pin a revision,
-append `#<commit-sha>` to the spec. The server entry is TypeScript; the desktop
-GUI entry is the committed `dist/gui-experimental.cjs`, so there is no build
-step for normal use.
+OpenCode installs the package and its dependencies on reload. The server entry
+is TypeScript; the desktop GUI entry is the committed
+`dist/gui-experimental.cjs`, so there is no build step for normal use.
 
 Requires OpenCode Desktop 2.3.2 or a compatible newer version; the GUI plugin
 API is experimental.
