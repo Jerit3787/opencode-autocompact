@@ -4,6 +4,10 @@ An OpenCode plugin that compacts a session when its context reaches an absolute
 token threshold — 500,000 tokens by default. The threshold can differ per chat,
 per project, and globally.
 
+![Autocompact settings and composer pill](docs/screenshots/preview.png)
+
+*Preview with illustrative data.*
+
 OpenCode's built-in compaction is window-relative (`compaction.buffer`), so the
 absolute point where it fires changes with the model. This plugin watches the
 actual conversation size reported after each model step and requests compaction
@@ -31,8 +35,14 @@ Subagent sessions are handled the same way as top-level sessions.
 
 ## Install
 
-The global config already loads it, and turns off OpenCode's own window-based
-auto-compaction so it cannot fire first:
+```sh
+git clone https://github.com/Jerit3787/opencode-autocompact.git
+cd opencode-autocompact
+npm install
+```
+
+Add the absolute plugin directory to `~/.config/opencode/opencode.jsonc` and
+turn off OpenCode's own window-based auto-compaction so it cannot fire first:
 
 ```jsonc title="~/.config/opencode/opencode.jsonc"
 {
@@ -42,7 +52,7 @@ auto-compaction so it cannot fire first:
   },
   "plugins": [
     {
-      "package": "/Users/danishhakim/Documents/Default Project/opencode-autocompact",
+      "package": "/absolute/path/to/opencode-autocompact",
       "options": {
         "threshold": 500000,
       },
@@ -51,9 +61,11 @@ auto-compaction so it cannot fire first:
 }
 ```
 
-For any other machine, point `package` at this directory (or publish the
-package) and reload OpenCode. The server entry is TypeScript; the desktop GUI
-entry is the committed `dist/gui-experimental.cjs`.
+Reload OpenCode after saving the config. The server entry is TypeScript; the
+desktop GUI entry is the committed `dist/gui-experimental.cjs`, so no build step
+is needed for normal use. Run `npm run build:gui` after changing the GUI source.
+Requires OpenCode Desktop 2.3.2 or a compatible newer version; the GUI plugin
+API is experimental.
 
 Leave `compaction.buffer` at its default positive reserve. Setting it to `0`
 makes the compaction request measure its input at the whole window, which
